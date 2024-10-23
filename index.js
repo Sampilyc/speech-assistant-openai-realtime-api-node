@@ -112,7 +112,7 @@ fastify.register(async (fastify) => {
                     content: [
                         {
                             type: 'input_text',
-                            text: 'Greet the user with "Hello there! I am an AI voice assistant powered by Twilio and the OpenAI Realtime API. You can ask me for facts, jokes, or anything you can imagine. How can I help you?"'
+                            text: 'Hola! Te comunicaste con Molinos Rio de la Plata. Habla Estefania, como te puedo ayudar?"'
                         }
                     ]
                 }
