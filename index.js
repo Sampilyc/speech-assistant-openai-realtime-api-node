@@ -50,9 +50,9 @@ fastify.get('/', async (request, reply) => {
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say>Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open-A.I. Realtime API</Say>
+                              <Say>Gracias por comunicarte con nuestro centro de atención al consumidor de Molinos. ¡Nos renovamos! Ahora nos podés escribir por WhatsApp enviando un mensaje al 1158032222 o a través del perfil oficial de Molinos en Facebook e Instagram.  Para más información sobre nuestros productos, te invitamos a acceder a nuestra web www.molinos.com.ar Por cuestiones de seguridad y calidad tu llamada estará siendo grabada, en unos instantes serás atendido.</Say>
                               <Pause length="1"/>
-                              <Say>O.K. you can start talking!</Say>
+                              <Say>Ya podes empezar a hablar.</Say>
                               <Connect>
                                   <Stream url="wss://${request.headers.host}/media-stream" />
                               </Connect>
