@@ -50,7 +50,7 @@ fastify.get('/', async (request, reply) => {
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say language="es-MX" voice="Polly.Lucia">Gracias por comunicarte con nuestro centro de atención al consumidor de Molinos. ¡Nos renovamos! Ahora nos podés escribir por WhatsApp enviando un mensaje al 1158032222 o a través del perfil oficial de Molinos en Facebook e Instagram.  Para más información sobre nuestros productos, te invitamos a acceder a nuestra web www.molinos.com.ar Por cuestiones de seguridad y calidad tu llamada estará siendo grabada, en unos instantes serás atendido.</Say>
+                              <Say language="es-MX" voice="Polly.Lucia">Gracias por comunicarte con nuestro centro de atención al consumidor de Molinos.</Say>
                               <Pause length="1"/>
                               <Say language="es-MX" voice="Polly.Lucia">Ya podés empezar a hablar.</Say>
                               <Connect>
@@ -112,7 +112,7 @@ fastify.register(async (fastify) => {
                     content: [
                         {
                             type: 'input_text',
-                            text: 'Hola! Te comunicaste con Molinos Rio de la Plata. Habla Estefania, como te puedo ayudar?"'
+                            text: 'Hola!"'
                         }
                     ]
                 }
