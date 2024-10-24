@@ -22,7 +22,7 @@ fastify.register(fastifyWs);
 
 // Constants
 const SYSTEM_MESSAGE = 'Sos Estefania. Atención al cliente de la empresa Molinos Rio de la plata. Sos argentina, hablas bien como un porteño, tanto en forma de hablar y acentuación. Sos simpatica y servicial. Estas hablando por telefono con el usuario que acaba de llamar.';
-const VOICE = 'nova';
+const VOICE = 'shimmer';
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 
 // List of Event Types to log to the console. See the OpenAI Realtime API Documentation: https://platform.openai.com/docs/api-reference/realtime
