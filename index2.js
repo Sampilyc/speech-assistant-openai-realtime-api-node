@@ -1,59 +1,98 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat en Tiempo Real con Estefanía</title>
-</head>
-<body>
-    <h1>Bienvenido al chat con Estefanía</h1>
-    <button id="startButton">Iniciar Chat</button>
-    <audio id="audioPlayback" autoplay></audio>
+// index2.js
+import Fastify from 'fastify';
+import WebSocket from 'ws';
+import dotenv from 'dotenv';
+import fastifyWs from '@fastify/websocket';
 
-    <script>
-        let audioContext, mediaRecorder, ws;
+dotenv.config();
 
-        document.getElementById("startButton").onclick = async () => {
-            // Initialize WebSocket
-            ws = new WebSocket("wss://realtimelyc-f2b32a7bc8c5.herokuapp.com/web-media-stream");
+const { OPENAI_API_KEY } = process.env;
 
-            ws.onopen = () => {
-                console.log("Connected to the WebSocket server.");
-            };
+const fastify = Fastify();
+fastify.register(fastifyWs);
 
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.event === "media") {
-                    const audioElement = document.getElementById("audioPlayback");
-                    audioElement.src = `data:audio/webm;base64,${data.media.payload}`;
+const SYSTEM_MESSAGE = 'Sos Estefania. Atención al cliente de la empresa Molinos Rio de la plata. Sos argentina, hablas bien como un porteño, tanto en forma de hablar y acentuación. Sos simpática y servicial.';
+const VOICE = 'shimmer';
+const PORT = process.env.PORT || 6060;
+
+fastify.get('/', async (request, reply) => {
+    reply.send({ message: 'Web-based Media Stream Server is running!' });
+});
+
+fastify.register(async (fastify) => {
+    fastify.get('/web-media-stream', { websocket: true }, (connection, req) => {
+        console.log('Client connected');
+
+        const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
+            headers: {
+                Authorization: `Bearer ${OPENAI_API_KEY}`,
+                "OpenAI-Beta": "realtime=v1"
+            }
+        });
+
+        // Initialization and configuration of OpenAI session
+        const initializeSession = () => {
+            const sessionUpdate = {
+                type: 'session.update',
+                session: {
+                    turn_detection: { type: 'server_vad' },
+                    input_audio_format: 'webm_opus',
+                    output_audio_format: 'webm_opus',
+                    voice: VOICE,
+                    instructions: SYSTEM_MESSAGE,
+                    modalities: ["text", "audio"],
+                    temperature: 0.8,
                 }
             };
-
-            // Initialize audio capture
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
-                    const reader = new FileReader();
-                    reader.onloadend = () => {
-                        ws.send(JSON.stringify({
-                            event: 'media',
-                            media: { payload: reader.result.split(',')[1] }
-                        }));
-                    };
-                    reader.readAsDataURL(event.data);
-                }
-            };
-
-            mediaRecorder.start(1000);
+            openAiWs.send(JSON.stringify(sessionUpdate));
         };
 
-        ws.onclose = () => {
-            console.log("Disconnected from WebSocket server.");
-            mediaRecorder.stop();
-        };
-    </script>
-</body>
-</html>
+        openAiWs.on('open', () => {
+            console.log('Connected to the OpenAI Realtime API');
+            setTimeout(initializeSession, 100);
+        });
+
+        openAiWs.on('message', (data) => {
+            const response = JSON.parse(data);
+            if (response.type === 'response.audio.delta' && response.delta) {
+                const audioDelta = {
+                    event: 'media',
+                    media: { payload: Buffer.from(response.delta, 'base64').toString('base64') }
+                };
+                connection.send(JSON.stringify(audioDelta));
+            }
+        });
+
+        connection.on('message', (message) => {
+            const data = JSON.parse(message);
+            if (data.event === 'media') {
+                const audioAppend = {
+                    type: 'input_audio_buffer.append',
+                    audio: data.media.payload
+                };
+                openAiWs.send(JSON.stringify(audioAppend));
+            }
+        });
+
+        connection.on('close', () => {
+            if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+            console.log('Client disconnected.');
+        });
+
+        openAiWs.on('close', () => {
+            console.log('Disconnected from the OpenAI Realtime API');
+        });
+
+        openAiWs.on('error', (error) => {
+            console.error('Error in the OpenAI WebSocket:', error);
+        });
+    });
+});
+
+fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
+    if (err) {
+        console.error(err);
+        process.exit(1);
+    }
+    console.log(`Server is listening on port ${PORT}`);
+});
