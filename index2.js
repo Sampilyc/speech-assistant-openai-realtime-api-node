@@ -30,6 +30,19 @@ fastify.register(async (fastify) => {
             }
         });
 
+        // Keep the connection alive by sending pings every 30 seconds
+        const keepAliveInterval = setInterval(() => {
+            if (connection.readyState === connection.OPEN) {
+                connection.ping();
+            }
+        }, 30000);
+
+        connection.on('close', () => {
+            clearInterval(keepAliveInterval); // Stop pings when connection closes
+            if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+            console.log('Client disconnected.');
+        });
+
         // Initialization and configuration of OpenAI session
         const initializeSession = () => {
             const sessionUpdate = {
@@ -72,11 +85,6 @@ fastify.register(async (fastify) => {
                 };
                 openAiWs.send(JSON.stringify(audioAppend));
             }
-        });
-
-        connection.on('close', () => {
-            if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-            console.log('Client disconnected.');
         });
 
         openAiWs.on('close', () => {
