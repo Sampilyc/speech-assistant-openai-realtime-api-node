@@ -1,14 +1,15 @@
 // index2.js
 
 import Fastify from 'fastify';
-import WebSocket from 'ws';
-import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
+import fastifyCors from '@fastify/cors';
+import fastifyStatic from '@fastify/static';
+import dotenv from 'dotenv';
 import fetch from 'node-fetch';
+import WebSocket from 'ws';
 import path from 'path';
-import fs from 'fs';
-import fastifyCors from '@fastify/cors'; // Importamos el plugin de CORS
+import { fileURLToPath } from 'url';
 
 // Cargar variables de entorno desde el archivo .env
 dotenv.config();
@@ -21,19 +22,25 @@ if (!OPENAI_API_KEY) {
     process.exit(1);
 }
 
+// Obtener __dirname en ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 // Inicializar Fastify
 const fastify = Fastify();
-fastify.register(fastifyFormBody);
-fastify.register(fastifyWs);
 
 // Habilitar CORS
 fastify.register(fastifyCors, {
-    origin: '*', // Puedes especificar el origen de tu frontend si es necesario
+    origin: '*', // Cambia '*' por tu dominio si deseas restringir el acceso
     methods: ['GET', 'POST', 'OPTIONS'],
 });
 
+// Registrar plugins
+fastify.register(fastifyFormBody);
+fastify.register(fastifyWs);
+
 // Servir archivos estáticos desde la carpeta 'public'
-fastify.register(require('@fastify/static'), {
+fastify.register(fastifyStatic, {
     root: path.join(__dirname, 'public'),
     prefix: '/', // Todas las rutas comenzarán con "/"
 });
@@ -52,7 +59,7 @@ fastify.get('/', async (request, reply) => {
 });
 
 // Ruta para analizar la imagen
-fastify.post('/analyze-image', async (request, reply) => { // Cambiado a '/analyze-image' sin '.php'
+fastify.post('/analyze-image', async (request, reply) => {
     const { image } = request.body;
 
     try {
@@ -94,7 +101,7 @@ fastify.post('/analyze-image', async (request, reply) => { // Cambiado a '/analy
 });
 
 // Ruta para actualizar las instrucciones
-fastify.post('/update-instructions', async (request, reply) => { // Cambiado a '/update-instructions' sin '.php'
+fastify.post('/update-instructions', async (request, reply) => {
     const { description, sessionId } = request.body;
 
     // Actualizar el mensaje del sistema con la descripción obtenida
@@ -109,7 +116,7 @@ fastify.post('/update-instructions', async (request, reply) => { // Cambiado a '
 });
 
 // Ruta para reiniciar la conversación
-fastify.post('/reset', async (request, reply) => { // Cambiado a '/reset' sin '.php'
+fastify.post('/reset', async (request, reply) => {
     const { sessionId } = request.body;
 
     // Eliminar la conversación de la sesión
@@ -191,10 +198,10 @@ fastify.register(async (fastify) => {
 });
 
 // Iniciar el servidor
-fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
+fastify.listen({ port: PORT, host: '0.0.0.0' }, (err, address) => {
     if (err) {
         console.error(err);
         process.exit(1);
     }
-    console.log(`El servidor del Avatar está escuchando en el puerto ${PORT}`);
+    console.log(`El servidor del Avatar está escuchando en ${address}`);
 });
