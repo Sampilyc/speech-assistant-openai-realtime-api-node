@@ -22,7 +22,7 @@ fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
 // Constantes
-const SYSTEM_MESSAGE = 'Sos Estefania. Atención al cliente de la empresa Molinos Rio de la Plata. Sos argentina, hablas bien como un porteño, tanto en forma de hablar y acentuación. Sos simpática y servicial. Estás hablando por teléfono con el usuario que acaba de llamar.';
+const SYSTEM_MESSAGE_TWILIO = 'Sos Estefania. Atención al cliente de la empresa Molinos Rio de la Plata. Sos argentina, hablas bien como un porteño, tanto en forma de hablar y acentuación. Sos simpática y servicial. Estás hablando por teléfono con el usuario que acaba de llamar.';
 const SYSTEM_MESSAGE_WEB = 'Sos Estefania, la asistente virtual de Molinos Rio de la Plata. Atendés al usuario que chatea contigo desde la web.';
 const VOICE = 'shimmer';
 const PORT = process.env.PORT || 5050; // Permitir asignación dinámica de puertos
@@ -44,8 +44,10 @@ const SHOW_TIMING_MATH = false;
 
 // Ruta raíz
 fastify.get('/', async (request, reply) => {
-    reply.send({ message: 'Twilio Media Stream Server is running!' });
+    reply.send({ message: 'Servidor en funcionamiento' });
 });
+
+// **Funcionalidad de Twilio (sin cambios)**
 
 // Ruta para que Twilio maneje llamadas entrantes
 fastify.all('/incoming-call', async (request, reply) => {
@@ -62,10 +64,10 @@ fastify.all('/incoming-call', async (request, reply) => {
     reply.type('text/xml').send(twimlResponse);
 });
 
-// Ruta WebSocket para media-stream de Twilio (sin modificar)
+// WebSocket route for media-stream (Twilio)
 fastify.register(async (fastify) => {
     fastify.get('/media-stream', { websocket: true }, (connection, req) => {
-        console.log('Client connected');
+        console.log('Cliente conectado a Twilio media-stream');
 
         // Estado específico de la conexión
         let streamSid = null;
@@ -90,13 +92,13 @@ fastify.register(async (fastify) => {
                     input_audio_format: 'g711_ulaw',
                     output_audio_format: 'g711_ulaw',
                     voice: VOICE,
-                    instructions: SYSTEM_MESSAGE,
+                    instructions: SYSTEM_MESSAGE_TWILIO,
                     modalities: ["text", "audio"],
                     temperature: 0.8,
                 }
             };
 
-            console.log('Sending session update:', JSON.stringify(sessionUpdate));
+            console.log('Enviando actualización de sesión:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
 
             // Enviar mensaje inicial para que la IA hable primero
@@ -113,13 +115,13 @@ fastify.register(async (fastify) => {
                     content: [
                         {
                             type: 'input_text',
-                            text: 'Hola!"'
+                            text: 'Hola!'
                         }
                     ]
                 }
             };
 
-            if (SHOW_TIMING_MATH) console.log('Sending initial conversation item:', JSON.stringify(initialConversationItem));
+            if (SHOW_TIMING_MATH) console.log('Enviando ítem de conversación inicial:', JSON.stringify(initialConversationItem));
             openAiWs.send(JSON.stringify(initialConversationItem));
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
         };
@@ -128,7 +130,7 @@ fastify.register(async (fastify) => {
         const handleSpeechStartedEvent = () => {
             if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
                 const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
-                if (SHOW_TIMING_MATH) console.log(`Calculating elapsed time for truncation: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`);
+                if (SHOW_TIMING_MATH) console.log(`Calculando tiempo transcurrido para truncar: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`);
 
                 if (lastAssistantItem) {
                     const truncateEvent = {
@@ -137,7 +139,7 @@ fastify.register(async (fastify) => {
                         content_index: 0,
                         audio_end_ms: elapsedTime
                     };
-                    if (SHOW_TIMING_MATH) console.log('Sending truncation event:', JSON.stringify(truncateEvent));
+                    if (SHOW_TIMING_MATH) console.log('Enviando evento de truncamiento:', JSON.stringify(truncateEvent));
                     openAiWs.send(JSON.stringify(truncateEvent));
                 }
 
@@ -168,7 +170,7 @@ fastify.register(async (fastify) => {
 
         // Evento de apertura para el WebSocket de OpenAI
         openAiWs.on('open', () => {
-            console.log('Connected to the OpenAI Realtime API');
+            console.log('Conectado a la API Realtime de OpenAI');
             setTimeout(initializeSession, 100);
         });
 
@@ -178,7 +180,7 @@ fastify.register(async (fastify) => {
                 const response = JSON.parse(data);
 
                 if (LOG_EVENT_TYPES.includes(response.type)) {
-                    console.log(`Received event: ${response.type}`, response);
+                    console.log(`Evento recibido: ${response.type}`, response);
                 }
 
                 if (response.type === 'response.audio.delta' && response.delta) {
@@ -192,7 +194,7 @@ fastify.register(async (fastify) => {
                     // El primer delta de una nueva respuesta inicia el contador de tiempo transcurrido
                     if (!responseStartTimestampTwilio) {
                         responseStartTimestampTwilio = latestMediaTimestamp;
-                        if (SHOW_TIMING_MATH) console.log(`Setting start timestamp for new response: ${responseStartTimestampTwilio}ms`);
+                        if (SHOW_TIMING_MATH) console.log(`Estableciendo timestamp de inicio para nueva respuesta: ${responseStartTimestampTwilio}ms`);
                     }
 
                     if (response.item_id) {
@@ -206,7 +208,7 @@ fastify.register(async (fastify) => {
                     handleSpeechStartedEvent();
                 }
             } catch (error) {
-                console.error('Error processing OpenAI message:', error, 'Raw message:', data);
+                console.error('Error procesando mensaje de OpenAI:', error, 'Mensaje sin procesar:', data);
             }
         });
 
@@ -218,7 +220,7 @@ fastify.register(async (fastify) => {
                 switch (data.event) {
                     case 'media':
                         latestMediaTimestamp = data.media.timestamp;
-                        if (SHOW_TIMING_MATH) console.log(`Received media message with timestamp: ${latestMediaTimestamp}ms`);
+                        if (SHOW_TIMING_MATH) console.log(`Mensaje de medios recibido con timestamp: ${latestMediaTimestamp}ms`);
                         if (openAiWs.readyState === WebSocket.OPEN) {
                             const audioAppend = {
                                 type: 'input_audio_buffer.append',
@@ -229,7 +231,7 @@ fastify.register(async (fastify) => {
                         break;
                     case 'start':
                         streamSid = data.start.streamSid;
-                        console.log('Incoming stream has started', streamSid);
+                        console.log('El stream entrante ha comenzado', streamSid);
 
                         // Reiniciar el inicio y el timestamp de medios en un nuevo stream
                         responseStartTimestampTwilio = null; 
@@ -241,35 +243,37 @@ fastify.register(async (fastify) => {
                         }
                         break;
                     default:
-                        console.log('Received non-media event:', data.event);
+                        console.log('Evento no de medios recibido:', data.event);
                         break;
                 }
             } catch (error) {
-                console.error('Error parsing message:', error, 'Message:', message);
+                console.error('Error analizando mensaje:', error, 'Mensaje:', message);
             }
         });
 
         // Manejar cierre de conexión
         connection.on('close', () => {
             if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-            console.log('Client disconnected.');
+            console.log('Cliente desconectado.');
         });
 
         // Manejar cierre y errores del WebSocket
         openAiWs.on('close', () => {
-            console.log('Disconnected from the OpenAI Realtime API');
+            console.log('Desconectado de la API Realtime de OpenAI');
         });
 
         openAiWs.on('error', (error) => {
-            console.error('Error in the OpenAI WebSocket:', error);
+            console.error('Error en el WebSocket de OpenAI:', error);
         });
     });
 });
 
-// Ruta WebSocket para la funcionalidad web (actualizada)
+// **Funcionalidad Web (añadida)**
+
+// Ruta WebSocket para la funcionalidad web
 fastify.register(async (fastify) => {
     fastify.get('/web-media-stream', { websocket: true }, (connection, req) => {
-        console.log('Client connected to web media stream');
+        console.log('Cliente conectado al stream web');
 
         const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
             headers: {
@@ -291,13 +295,12 @@ fastify.register(async (fastify) => {
                     temperature: 0.8,
                 }
             };
-
-            console.log('Sending session update for web:', JSON.stringify(sessionUpdate));
+            console.log('Enviando actualización de sesión para web:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
         };
 
         openAiWs.on('open', () => {
-            console.log('Connected to the OpenAI Realtime API for web');
+            console.log('Conectado a la API Realtime de OpenAI para web');
             setTimeout(initializeSession, 100);
         });
 
@@ -306,7 +309,7 @@ fastify.register(async (fastify) => {
                 const response = JSON.parse(data);
 
                 if (LOG_EVENT_TYPES.includes(response.type)) {
-                    console.log(`Received event for web: ${response.type}`, response);
+                    console.log(`Evento recibido para web: ${response.type}`, response);
                 }
 
                 if (response.type === 'response.audio.delta' && response.delta) {
@@ -316,7 +319,7 @@ fastify.register(async (fastify) => {
                     connection.socket.send(audioBuffer);
                 }
             } catch (error) {
-                console.error('Error processing OpenAI message for web:', error, 'Raw message:', data);
+                console.error('Error procesando mensaje de OpenAI para web:', error, 'Mensaje sin procesar:', data);
             }
         });
 
@@ -331,21 +334,21 @@ fastify.register(async (fastify) => {
                     openAiWs.send(JSON.stringify(audioAppend));
                 }
             } catch (error) {
-                console.error('Error parsing message from web client:', error, 'Message:', message);
+                console.error('Error procesando mensaje del cliente web:', error, 'Mensaje:', message);
             }
         });
 
         connection.socket.on('close', () => {
             if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-            console.log('Web client disconnected.');
+            console.log('Cliente web desconectado.');
         });
 
         openAiWs.on('close', () => {
-            console.log('Disconnected from the OpenAI Realtime API for web');
+            console.log('Conexión con OpenAI cerrada para web');
         });
 
         openAiWs.on('error', (error) => {
-            console.error('Error in the OpenAI WebSocket for web:', error);
+            console.error('Error en el WebSocket de OpenAI para web:', error);
         });
     });
 });
@@ -353,8 +356,8 @@ fastify.register(async (fastify) => {
 // Iniciar el servidor
 fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
     if (err) {
-        console.error('Error starting server:', err);
+        console.error('Error iniciando el servidor:', err);
         process.exit(1);
     }
-    console.log(`Server is listening on port ${PORT}`);
+    console.log(`Servidor escuchando en el puerto ${PORT}`);
 });
