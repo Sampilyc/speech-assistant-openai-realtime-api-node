@@ -266,7 +266,7 @@ fastify.register(async (fastify) => {
     });
 });
 
-// Ruta WebSocket para la funcionalidad web (añadido)
+// Ruta WebSocket para la funcionalidad web (actualizada)
 fastify.register(async (fastify) => {
     fastify.get('/web-media-stream', { websocket: true }, (connection, req) => {
         console.log('Client connected to web media stream');
@@ -283,8 +283,8 @@ fastify.register(async (fastify) => {
                 type: 'session.update',
                 session: {
                     turn_detection: { type: 'server_vad' },
-                    input_audio_format: 'webm_opus',
-                    output_audio_format: 'webm_opus',
+                    input_audio_format: 'pcm16',
+                    output_audio_format: 'pcm16',
                     voice: VOICE,
                     instructions: SYSTEM_MESSAGE_WEB,
                     modalities: ["text", "audio"],
@@ -294,9 +294,6 @@ fastify.register(async (fastify) => {
 
             console.log('Sending session update for web:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
-
-            // Enviar mensaje inicial si deseas que la IA hable primero en la web
-            // sendInitialConversationItem();
         };
 
         openAiWs.on('open', () => {
@@ -313,11 +310,10 @@ fastify.register(async (fastify) => {
                 }
 
                 if (response.type === 'response.audio.delta' && response.delta) {
-                    const audioDelta = {
-                        event: 'media',
-                        media: { payload: response.delta }
-                    };
-                    connection.socket.send(JSON.stringify(audioDelta));
+                    const audioBuffer = Buffer.from(response.delta, 'base64');
+
+                    // Enviar datos de audio de vuelta al cliente
+                    connection.socket.send(audioBuffer);
                 }
             } catch (error) {
                 console.error('Error processing OpenAI message for web:', error, 'Raw message:', data);
@@ -326,15 +322,13 @@ fastify.register(async (fastify) => {
 
         connection.socket.on('message', async (message) => {
             try {
-                const data = JSON.parse(message);
-                if (data.event === 'media') {
-                    if (openAiWs.readyState === WebSocket.OPEN) {
-                        const audioAppend = {
-                            type: 'input_audio_buffer.append',
-                            audio: data.media.payload
-                        };
-                        openAiWs.send(JSON.stringify(audioAppend));
-                    }
+                // Recibir datos de audio PCM del cliente
+                if (openAiWs.readyState === WebSocket.OPEN) {
+                    const audioAppend = {
+                        type: 'input_audio_buffer.append',
+                        audio: Buffer.from(message).toString('base64')
+                    };
+                    openAiWs.send(JSON.stringify(audioAppend));
                 }
             } catch (error) {
                 console.error('Error parsing message from web client:', error, 'Message:', message);
