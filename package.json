@@ -19,6 +19,7 @@
     "ws": "^8.14.1",
     "node-fetch": "^3.3.1",
     "@fastify/static": "^6.8.0",
-    "path": "^0.12.7"
+    "path": "^0.12.7",
+    "@fastify/cors": "^8.1.0" // Añadido para manejar CORS
   }
 }
