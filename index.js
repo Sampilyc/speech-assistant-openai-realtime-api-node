@@ -1,41 +1,53 @@
+// index.js
 import Fastify from 'fastify';
 import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
 
+// Cargar variables de entorno desde el archivo .env
 dotenv.config();
 
+// Obtener la clave API de OpenAI de las variables de entorno
 const { OPENAI_API_KEY } = process.env;
 
 if (!OPENAI_API_KEY) {
-    console.error('Missing OpenAI API key. Please set it in the .env file.');
+    console.error('Falta la clave API de OpenAI. Por favor, establécela en el archivo .env.');
     process.exit(1);
 }
 
+// Inicializar Fastify
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
-const SYSTEM_MESSAGE = 'Sos Estefania. Atención al cliente de la empresa Molinos Rio de la plata. Sos argentina, hablas bien como un porteño, tanto en forma de hablar y acentuación. Sos simpatica y servicial. Estas hablando por telefono con el usuario que acaba de llamar.';
+// Constantes
+const SYSTEM_MESSAGE = 'Sos Estefania. Atención al cliente de la empresa Molinos Rio de la Plata. Sos argentina, hablas bien como un porteño, tanto en forma de hablar y acentuación. Sos simpática y servicial. Estás hablando por teléfono con el usuario que acaba de llamar.';
 const SYSTEM_MESSAGE_WEB = 'Sos Estefania, la asistente virtual de Molinos Rio de la Plata. Atendés al usuario que chatea contigo desde la web.';
 const VOICE = 'shimmer';
-const PORT = process.env.PORT || 5050;
+const PORT = process.env.PORT || 5050; // Permitir asignación dinámica de puertos
 
+// Lista de tipos de eventos para registrar en la consola
 const LOG_EVENT_TYPES = [
-    'error', 'response.content.done', 'rate_limits.updated', 'response.done',
-    'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
-    'input_audio_buffer.speech_started', 'session.created'
+    'error',
+    'response.content.done',
+    'rate_limits.updated',
+    'response.done',
+    'input_audio_buffer.committed',
+    'input_audio_buffer.speech_stopped',
+    'input_audio_buffer.speech_started',
+    'session.created'
 ];
 
+// Mostrar cálculos de tiempo de respuesta de la IA
 const SHOW_TIMING_MATH = false;
 
-// Ruta principal
+// Ruta raíz
 fastify.get('/', async (request, reply) => {
-    reply.send({ message: 'Twilio Media Stream Server and Web Media Stream are running!' });
+    reply.send({ message: 'Twilio Media Stream Server is running!' });
 });
 
-// Ruta de Twilio para llamadas
+// Ruta para que Twilio maneje llamadas entrantes
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
@@ -50,11 +62,12 @@ fastify.all('/incoming-call', async (request, reply) => {
     reply.type('text/xml').send(twimlResponse);
 });
 
-// WebSocket para Twilio (sin modificar)
+// Ruta WebSocket para media-stream de Twilio (sin modificar)
 fastify.register(async (fastify) => {
     fastify.get('/media-stream', { websocket: true }, (connection, req) => {
-        console.log('Client connected to Twilio media-stream');
+        console.log('Client connected');
 
+        // Estado específico de la conexión
         let streamSid = null;
         let latestMediaTimestamp = 0;
         let lastAssistantItem = null;
@@ -68,6 +81,7 @@ fastify.register(async (fastify) => {
             }
         });
 
+        // Control de sesión inicial con OpenAI
         const initializeSession = () => {
             const sessionUpdate = {
                 type: 'session.update',
@@ -81,11 +95,15 @@ fastify.register(async (fastify) => {
                     temperature: 0.8,
                 }
             };
+
             console.log('Sending session update:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
+
+            // Enviar mensaje inicial para que la IA hable primero
             sendInitialConversationItem();
         };
 
+        // Enviar ítem de conversación inicial si la IA habla primero
         const sendInitialConversationItem = () => {
             const initialConversationItem = {
                 type: 'conversation.item.create',
@@ -100,15 +118,18 @@ fastify.register(async (fastify) => {
                     ]
                 }
             };
+
             if (SHOW_TIMING_MATH) console.log('Sending initial conversation item:', JSON.stringify(initialConversationItem));
             openAiWs.send(JSON.stringify(initialConversationItem));
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
         };
 
+        // Manejar interrupción cuando el llamante comienza a hablar
         const handleSpeechStartedEvent = () => {
             if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
                 const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
                 if (SHOW_TIMING_MATH) console.log(`Calculating elapsed time for truncation: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`);
+
                 if (lastAssistantItem) {
                     const truncateEvent = {
                         type: 'conversation.item.truncate',
@@ -124,21 +145,42 @@ fastify.register(async (fastify) => {
                     event: 'clear',
                     streamSid: streamSid
                 }));
+
+                // Reiniciar
                 markQueue = [];
                 lastAssistantItem = null;
                 responseStartTimestampTwilio = null;
             }
         };
 
+        // Enviar mensajes de marca a Media Streams para saber si la reproducción de la respuesta de la IA ha terminado
+        const sendMark = (connection, streamSid) => {
+            if (streamSid) {
+                const markEvent = {
+                    event: 'mark',
+                    streamSid: streamSid,
+                    mark: { name: 'responsePart' }
+                };
+                connection.send(JSON.stringify(markEvent));
+                markQueue.push('responsePart');
+            }
+        };
+
+        // Evento de apertura para el WebSocket de OpenAI
         openAiWs.on('open', () => {
             console.log('Connected to the OpenAI Realtime API');
             setTimeout(initializeSession, 100);
         });
 
+        // Escuchar mensajes del WebSocket de OpenAI (y enviar a Twilio si es necesario)
         openAiWs.on('message', (data) => {
             try {
                 const response = JSON.parse(data);
-                if (LOG_EVENT_TYPES.includes(response.type)) console.log(`Received event: ${response.type}`, response);
+
+                if (LOG_EVENT_TYPES.includes(response.type)) {
+                    console.log(`Received event: ${response.type}`, response);
+                }
+
                 if (response.type === 'response.audio.delta' && response.delta) {
                     const audioDelta = {
                         event: 'media',
@@ -146,21 +188,37 @@ fastify.register(async (fastify) => {
                         media: { payload: Buffer.from(response.delta, 'base64').toString('base64') }
                     };
                     connection.send(JSON.stringify(audioDelta));
-                    if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
-                    if (response.item_id) lastAssistantItem = response.item_id;
+
+                    // El primer delta de una nueva respuesta inicia el contador de tiempo transcurrido
+                    if (!responseStartTimestampTwilio) {
+                        responseStartTimestampTwilio = latestMediaTimestamp;
+                        if (SHOW_TIMING_MATH) console.log(`Setting start timestamp for new response: ${responseStartTimestampTwilio}ms`);
+                    }
+
+                    if (response.item_id) {
+                        lastAssistantItem = response.item_id;
+                    }
+                    
+                    sendMark(connection, streamSid);
                 }
-                if (response.type === 'input_audio_buffer.speech_started') handleSpeechStartedEvent();
+
+                if (response.type === 'input_audio_buffer.speech_started') {
+                    handleSpeechStartedEvent();
+                }
             } catch (error) {
                 console.error('Error processing OpenAI message:', error, 'Raw message:', data);
             }
         });
 
+        // Manejar mensajes entrantes de Twilio
         connection.on('message', (message) => {
             try {
                 const data = JSON.parse(message);
+
                 switch (data.event) {
                     case 'media':
                         latestMediaTimestamp = data.media.timestamp;
+                        if (SHOW_TIMING_MATH) console.log(`Received media message with timestamp: ${latestMediaTimestamp}ms`);
                         if (openAiWs.readyState === WebSocket.OPEN) {
                             const audioAppend = {
                                 type: 'input_audio_buffer.append',
@@ -172,11 +230,18 @@ fastify.register(async (fastify) => {
                     case 'start':
                         streamSid = data.start.streamSid;
                         console.log('Incoming stream has started', streamSid);
-                        responseStartTimestampTwilio = null;
+
+                        // Reiniciar el inicio y el timestamp de medios en un nuevo stream
+                        responseStartTimestampTwilio = null; 
                         latestMediaTimestamp = 0;
                         break;
                     case 'mark':
-                        if (markQueue.length > 0) markQueue.shift();
+                        if (markQueue.length > 0) {
+                            markQueue.shift();
+                        }
+                        break;
+                    default:
+                        console.log('Received non-media event:', data.event);
                         break;
                 }
             } catch (error) {
@@ -184,11 +249,13 @@ fastify.register(async (fastify) => {
             }
         });
 
+        // Manejar cierre de conexión
         connection.on('close', () => {
             if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
             console.log('Client disconnected.');
         });
 
+        // Manejar cierre y errores del WebSocket
         openAiWs.on('close', () => {
             console.log('Disconnected from the OpenAI Realtime API');
         });
@@ -199,7 +266,7 @@ fastify.register(async (fastify) => {
     });
 });
 
-// WebSocket para la web (nuevo)
+// Ruta WebSocket para la funcionalidad web (añadido)
 fastify.register(async (fastify) => {
     fastify.get('/web-media-stream', { websocket: true }, (connection, req) => {
         console.log('Client connected to web media stream');
@@ -224,7 +291,12 @@ fastify.register(async (fastify) => {
                     temperature: 0.8,
                 }
             };
+
+            console.log('Sending session update for web:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
+
+            // Enviar mensaje inicial si deseas que la IA hable primero en la web
+            // sendInitialConversationItem();
         };
 
         openAiWs.on('open', () => {
@@ -233,30 +305,43 @@ fastify.register(async (fastify) => {
         });
 
         openAiWs.on('message', (data) => {
-            const response = JSON.parse(data);
-            if (response.type === 'response.audio.delta' && response.delta) {
-                const audioDelta = {
-                    event: 'media',
-                    media: { payload: Buffer.from(response.delta, 'base64').toString('base64') }
-                };
-                connection.send(JSON.stringify(audioDelta));
-            }
-        });
+            try {
+                const response = JSON.parse(data);
 
-        connection.on('message', (message) => {
-            const data = JSON.parse(message);
-            if (data.event === 'media') {
-                if (openAiWs.readyState === WebSocket.OPEN) {
-                    const audioAppend = {
-                        type: 'input_audio_buffer.append',
-                        audio: data.media.payload
-                    };
-                    openAiWs.send(JSON.stringify(audioAppend));
+                if (LOG_EVENT_TYPES.includes(response.type)) {
+                    console.log(`Received event for web: ${response.type}`, response);
                 }
+
+                if (response.type === 'response.audio.delta' && response.delta) {
+                    const audioDelta = {
+                        event: 'media',
+                        media: { payload: response.delta }
+                    };
+                    connection.socket.send(JSON.stringify(audioDelta));
+                }
+            } catch (error) {
+                console.error('Error processing OpenAI message for web:', error, 'Raw message:', data);
             }
         });
 
-        connection.on('close', () => {
+        connection.socket.on('message', async (message) => {
+            try {
+                const data = JSON.parse(message);
+                if (data.event === 'media') {
+                    if (openAiWs.readyState === WebSocket.OPEN) {
+                        const audioAppend = {
+                            type: 'input_audio_buffer.append',
+                            audio: data.media.payload
+                        };
+                        openAiWs.send(JSON.stringify(audioAppend));
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing message from web client:', error, 'Message:', message);
+            }
+        });
+
+        connection.socket.on('close', () => {
             if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
             console.log('Web client disconnected.');
         });
@@ -271,6 +356,7 @@ fastify.register(async (fastify) => {
     });
 });
 
+// Iniciar el servidor
 fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
     if (err) {
         console.error('Error starting server:', err);
