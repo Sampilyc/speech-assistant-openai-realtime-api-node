@@ -8,6 +8,7 @@ import fastifyWs from '@fastify/websocket';
 import fetch from 'node-fetch';
 import path from 'path';
 import fs from 'fs';
+import fastifyCors from '@fastify/cors'; // Importamos el plugin de CORS
 
 // Cargar variables de entorno desde el archivo .env
 dotenv.config();
@@ -24,6 +25,12 @@ if (!OPENAI_API_KEY) {
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
+
+// Habilitar CORS
+fastify.register(fastifyCors, {
+    origin: '*', // Puedes especificar el origen de tu frontend si es necesario
+    methods: ['GET', 'POST', 'OPTIONS'],
+});
 
 // Servir archivos estáticos desde la carpeta 'public'
 fastify.register(require('@fastify/static'), {
@@ -45,7 +52,7 @@ fastify.get('/', async (request, reply) => {
 });
 
 // Ruta para analizar la imagen
-fastify.post('/analyze_image.php', async (request, reply) => {
+fastify.post('/analyze-image', async (request, reply) => { // Cambiado a '/analyze-image' sin '.php'
     const { image } = request.body;
 
     try {
@@ -87,7 +94,7 @@ fastify.post('/analyze_image.php', async (request, reply) => {
 });
 
 // Ruta para actualizar las instrucciones
-fastify.post('/update_instructions.php', async (request, reply) => {
+fastify.post('/update-instructions', async (request, reply) => { // Cambiado a '/update-instructions' sin '.php'
     const { description, sessionId } = request.body;
 
     // Actualizar el mensaje del sistema con la descripción obtenida
@@ -102,7 +109,7 @@ fastify.post('/update_instructions.php', async (request, reply) => {
 });
 
 // Ruta para reiniciar la conversación
-fastify.post('/reset.php', async (request, reply) => {
+fastify.post('/reset', async (request, reply) => { // Cambiado a '/reset' sin '.php'
     const { sessionId } = request.body;
 
     // Eliminar la conversación de la sesión
