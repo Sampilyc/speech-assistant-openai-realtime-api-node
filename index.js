@@ -21,6 +21,7 @@ const SYSTEM_MESSAGE = 'Sos Estefania. Atención al cliente de la empresa Molino
 const SYSTEM_MESSAGE_WEB = 'Sos Estefania, la asistente virtual de Molinos Rio de la Plata. Atendés al usuario que chatea contigo desde la web.';
 const VOICE = 'shimmer';
 const PORT = process.env.PORT || 5050;
+
 const LOG_EVENT_TYPES = [
     'error', 'response.content.done', 'rate_limits.updated', 'response.done',
     'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
@@ -29,12 +30,12 @@ const LOG_EVENT_TYPES = [
 
 const SHOW_TIMING_MATH = false;
 
-// Root Route
+// Ruta principal
 fastify.get('/', async (request, reply) => {
     reply.send({ message: 'Twilio Media Stream Server and Web Media Stream are running!' });
 });
 
-// Route for Twilio to handle incoming calls
+// Ruta de Twilio para llamadas
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
@@ -49,7 +50,7 @@ fastify.all('/incoming-call', async (request, reply) => {
     reply.type('text/xml').send(twimlResponse);
 });
 
-// WebSocket route for Twilio media-stream (NO MODIFICADO)
+// WebSocket para Twilio (sin modificar)
 fastify.register(async (fastify) => {
     fastify.get('/media-stream', { websocket: true }, (connection, req) => {
         console.log('Client connected to Twilio media-stream');
@@ -82,6 +83,51 @@ fastify.register(async (fastify) => {
             };
             console.log('Sending session update:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
+            sendInitialConversationItem();
+        };
+
+        const sendInitialConversationItem = () => {
+            const initialConversationItem = {
+                type: 'conversation.item.create',
+                item: {
+                    type: 'message',
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'input_text',
+                            text: 'Hola!"'
+                        }
+                    ]
+                }
+            };
+            if (SHOW_TIMING_MATH) console.log('Sending initial conversation item:', JSON.stringify(initialConversationItem));
+            openAiWs.send(JSON.stringify(initialConversationItem));
+            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+        };
+
+        const handleSpeechStartedEvent = () => {
+            if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
+                const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
+                if (SHOW_TIMING_MATH) console.log(`Calculating elapsed time for truncation: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`);
+                if (lastAssistantItem) {
+                    const truncateEvent = {
+                        type: 'conversation.item.truncate',
+                        item_id: lastAssistantItem,
+                        content_index: 0,
+                        audio_end_ms: elapsedTime
+                    };
+                    if (SHOW_TIMING_MATH) console.log('Sending truncation event:', JSON.stringify(truncateEvent));
+                    openAiWs.send(JSON.stringify(truncateEvent));
+                }
+
+                connection.send(JSON.stringify({
+                    event: 'clear',
+                    streamSid: streamSid
+                }));
+                markQueue = [];
+                lastAssistantItem = null;
+                responseStartTimestampTwilio = null;
+            }
         };
 
         openAiWs.on('open', () => {
@@ -92,11 +138,7 @@ fastify.register(async (fastify) => {
         openAiWs.on('message', (data) => {
             try {
                 const response = JSON.parse(data);
-
-                if (LOG_EVENT_TYPES.includes(response.type)) {
-                    console.log(`Received event: ${response.type}`, response);
-                }
-
+                if (LOG_EVENT_TYPES.includes(response.type)) console.log(`Received event: ${response.type}`, response);
                 if (response.type === 'response.audio.delta' && response.delta) {
                     const audioDelta = {
                         event: 'media',
@@ -104,14 +146,10 @@ fastify.register(async (fastify) => {
                         media: { payload: Buffer.from(response.delta, 'base64').toString('base64') }
                     };
                     connection.send(JSON.stringify(audioDelta));
-
-                    if (!responseStartTimestampTwilio) {
-                        responseStartTimestampTwilio = latestMediaTimestamp;
-                    }
-                    if (response.item_id) {
-                        lastAssistantItem = response.item_id;
-                    }
+                    if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
+                    if (response.item_id) lastAssistantItem = response.item_id;
                 }
+                if (response.type === 'input_audio_buffer.speech_started') handleSpeechStartedEvent();
             } catch (error) {
                 console.error('Error processing OpenAI message:', error, 'Raw message:', data);
             }
@@ -133,6 +171,9 @@ fastify.register(async (fastify) => {
                         break;
                     case 'start':
                         streamSid = data.start.streamSid;
+                        console.log('Incoming stream has started', streamSid);
+                        responseStartTimestampTwilio = null;
+                        latestMediaTimestamp = 0;
                         break;
                     case 'mark':
                         if (markQueue.length > 0) markQueue.shift();
@@ -158,7 +199,7 @@ fastify.register(async (fastify) => {
     });
 });
 
-// WebSocket para Web (NUEVO)
+// WebSocket para la web (nuevo)
 fastify.register(async (fastify) => {
     fastify.get('/web-media-stream', { websocket: true }, (connection, req) => {
         console.log('Client connected to web media stream');
