@@ -278,22 +278,20 @@ fastify.register(async (fastify) => {
             }
         });
 
-       const initializeSession = () => {
-    const sessionUpdate = {
-        type: 'session.update',
-        session: {
-            turn_detection: { type: 'server_vad' },
-            input_audio_format: 'pcm16',      // Cambiado a pcm16
-            output_audio_format: 'pcm16',     // Cambiado a pcm16
-            voice: VOICE,
-            instructions: SYSTEM_MESSAGE_WEB,
-            modalities: ["text", "audio"],
-            temperature: 0.8,
-        }
-    };
-    console.log('Enviando actualización de sesión para web:', JSON.stringify(sessionUpdate));
-    openAiWs.send(JSON.stringify(sessionUpdate));
-};
+        const initializeSession = () => {
+            const sessionUpdate = {
+                type: 'session.update',
+                session: {
+                    turn_detection: { type: 'server_vad' },
+                    input_audio_format: 'webm_opus',
+                    output_audio_format: 'webm_opus',
+                    voice: VOICE,
+                    instructions: SYSTEM_MESSAGE_WEB,
+                    modalities: ["text", "audio"],
+                    temperature: 0.8,
+                }
+            };
+
             console.log('Sending session update for web:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
 
