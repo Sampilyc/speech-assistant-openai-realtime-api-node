@@ -1,4 +1,3 @@
-// index.js
 import Fastify from 'fastify';
 import WebSocket from 'ws';
 import dotenv from 'dotenv';
