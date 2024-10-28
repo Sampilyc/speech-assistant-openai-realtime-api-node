@@ -47,13 +47,10 @@ fastify.get('/', async (request, reply) => {
     reply.send({ message: 'Twilio Media Stream Server is running!' });
 });
 
-// Ruta para que Twilio maneje llamadas entrantes
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say language="es-MX" voice="Polly.Lucia">Gracias por comunicarte con nuestro centro de atención al consumidor de Molinos.</Say>
-                              <Pause length="1"/>
-                              <Say language="es-MX" voice="Polly.Lucia">Ya podés empezar a hablar.</Say>
+                              <Play>https://www.logicoycreativo.com/heroku/bienvenidamolinos.mp3</Play>
                               <Connect>
                                   <Stream url="wss://${request.headers.host}/media-stream" />
                               </Connect>
