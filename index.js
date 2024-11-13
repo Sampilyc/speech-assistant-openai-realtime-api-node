@@ -4,6 +4,8 @@ import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
+import https from 'https';
+import { URLSearchParams } from 'url';
 
 // Cargar variables de entorno desde el archivo .env
 dotenv.config();
@@ -22,7 +24,7 @@ fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
 // Constantes
-const SYSTEM_MESSAGE = 'Sos Estefania. Atención al cliente de la empresa Molinos Rio de la Plata. Sos argentina, hablas bien como un porteña, tanto en forma de hablar,acentuación y tonalidad.Enfasis en que los argentinos no decimos tienes, decimos tenés, no decimos aqui, decimos acá, y aplica para todos los otros casos similares (tenes que en vez de tendras, etc).El acento porteño tambien pronuncia la "ll" como una "sh", por ejemplo "llovio" suena como "shovio" como dirias "shazam" o "sheila"., tene en cuenta eso para todos los casos. Sos simpática y servicial y no hables con tono monotono, asi no parece robotica la voz, pone enfasis como una persona real y habla rapido. Estás hablando por teléfono con el usuario que acaba de llamar.No te salgas de tu rol ni de la tematica que tenes.Indaga sobre que quiere el cliente antes de proceder a cargar el reclamo, es muy importante que hagas preguntas lo suficiente para tener mas info y tener un acabado y detallado relato de lo que el cliente expresa ( en lo que respecta al reclamo o la queja,no te quedes con lo primero que te dice, indaga mas) y luego eso tenerlo para cargarlo en el campo comentario, antes de pedirle los demas datos.Cuando tengas bien completo lo que el cliente quiera (reclamo o sugerencia) y en base a lo que sea que cargarlo en la categoria correspondiente (pidiendole los datos que corresponde para la categoria que estableciste), pedile los datos de a uno o dos a la vez, todos juntos, asi no se atosiga el cliente.No tengas conversaciones de cosas ajenas a lo que te compete,como lo haria una agente de atención al cliente real.El cliente por este canal puede hacer 4 diferentes gestiones que a continuación te detallo.(Primero que te diga el contenido del reclamo o sugerencia o tramite (que corresponde en el dato comentario) y luego le pedis los datos obligatorios para hacer la finalizar la gestion) Cada tramite tiene sus propios datos para ser completado: [Los campos marcados con asterisco son obligatorios. ¿Por qué motivo se contacta? 1 - Experiencia con nuestros productos: Datos requeridos para generar el reclamo: Los campos marcados con asterisco son obligatorios. Nombre y apellido * Domicilio (Calle, número, departamento y piso) * Entre Calles * Código Postal * Localidad y Barrio * Provincia * Numero de celular (con prefijo) * Correo electrónico * Marca * Producto * Fecha de vencimiento del producto * dd/mm/aaaa Otro datos de fechado (horas, letras, números) Lugar de compra * Dirección del lugar de compra * Día en que se efectuó la compra * dd/mm/aaaa Comentario* 2)Consultas: Los campos marcados con asterisco son obligatorios. Nombre y apellido * Provincia/Localidad * Numero de celular (con prefijo) * Correo electrónico * Comentario* 3) Gestión comercial: Los campos marcados con asterisco son obligatorios. Nombre y apellido * Provincia/Localidad * Numero de celular (con prefijo) * Correo electrónico * Tipo de comercio * Marca * Producto * 4)Sugerencias: Formulario de contacto Los campos marcados con asterisco son obligatorios. Nombre y apellido * Provincia/Localidad * Numero de celular (con prefijo) * Correo electrónico * Comentario*]. Recordá, que antes de pedirle los datos, es extremadamente importante que le hayas repreguntado al cliente sobre su reclamo o sugerencia para obtener un buen campo de comentario detallado sobre lo que dice.No pidas ningun dato antes de repreguntar y tener completo el comentario (Reclamo o sugerencia). Una vez que se termina de generar el reclamo, se le indica al cliente que le llegara un correo electrónico y se despide del mismo.';
+const SYSTEM_MESSAGE = 'Sos Estefania, la asistente virtual de Molinos Rio de la Plata...'; // Mensaje resumido
 const SYSTEM_MESSAGE_WEB = 'Sos Estefania, la asistente virtual de Molinos Rio de la Plata. Atendés al usuario que chatea contigo desde la web.';
 const VOICE = 'shimmer';
 const PORT = process.env.PORT || 5050; // Permitir asignación dinámica de puertos
@@ -36,7 +38,8 @@ const LOG_EVENT_TYPES = [
     'input_audio_buffer.committed',
     'input_audio_buffer.speech_stopped',
     'input_audio_buffer.speech_started',
-    'session.created'
+    'session.created',
+    'response.delta' // Añadido para ver los deltas de respuesta
 ];
 
 // Mostrar cálculos de tiempo de respuesta de la IA
@@ -59,7 +62,7 @@ fastify.all('/incoming-call', async (request, reply) => {
     reply.type('text/xml').send(twimlResponse);
 });
 
-// Ruta WebSocket para media-stream de Twilio (sin modificar)
+// Ruta WebSocket para media-stream de Twilio
 fastify.register(async (fastify) => {
     fastify.get('/media-stream', { websocket: true }, (connection, req) => {
         console.log('Client connected');
@@ -70,6 +73,7 @@ fastify.register(async (fastify) => {
         let lastAssistantItem = null;
         let markQueue = [];
         let responseStartTimestampTwilio = null;
+        let assistantReplyText = ''; // Variable para acumular el texto del asistente
 
         const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
             headers: {
@@ -110,7 +114,7 @@ fastify.register(async (fastify) => {
                     content: [
                         {
                             type: 'input_text',
-                            text: 'Hola!"'
+                            text: 'Hola!'
                         }
                     ]
                 }
@@ -150,7 +154,7 @@ fastify.register(async (fastify) => {
             }
         };
 
-        // Enviar mensajes de marca a Media Streams para saber si la reproducción de la respuesta de la IA ha terminado
+        // Enviar mensajes de marca a Media Streams
         const sendMark = (connection, streamSid) => {
             if (streamSid) {
                 const markEvent = {
@@ -169,7 +173,7 @@ fastify.register(async (fastify) => {
             setTimeout(initializeSession, 100);
         });
 
-        // Escuchar mensajes del WebSocket de OpenAI (y enviar a Twilio si es necesario)
+        // Escuchar mensajes del WebSocket de OpenAI
         openAiWs.on('message', (data) => {
             try {
                 const response = JSON.parse(data);
@@ -178,6 +182,49 @@ fastify.register(async (fastify) => {
                     console.log(`Received event: ${response.type}`, response);
                 }
 
+                // Acumular el texto del asistente
+                if (response.type === 'response.delta' && response.delta && response.delta.text) {
+                    assistantReplyText += response.delta.text;
+                }
+
+                // Enviar el texto acumulado al completar la respuesta
+                if (response.type === 'response.content.done') {
+                    // Configurar los datos y opciones para la solicitud POST
+                    const postData = new URLSearchParams({ message: assistantReplyText }).toString();
+
+                    const options = {
+                        hostname: 'www.logicoycreativo.com',
+                        port: 443,
+                        path: '/leeventos.php',
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Content-Length': Buffer.byteLength(postData)
+                        }
+                    };
+
+                    // Realizar la solicitud POST
+                    const req = https.request(options, (res) => {
+                        console.log(`STATUS: ${res.statusCode}`);
+                        res.setEncoding('utf8');
+                        res.on('data', (chunk) => {
+                            console.log(`BODY: ${chunk}`);
+                        });
+                    });
+
+                    req.on('error', (e) => {
+                        console.error(`Problem with request: ${e.message}`);
+                    });
+
+                    // Escribir los datos en el cuerpo de la solicitud
+                    req.write(postData);
+                    req.end();
+
+                    // Reiniciar el texto acumulado
+                    assistantReplyText = '';
+                }
+
+                // Manejar el audio de la respuesta del asistente
                 if (response.type === 'response.audio.delta' && response.delta) {
                     const audioDelta = {
                         event: 'media',
@@ -186,7 +233,7 @@ fastify.register(async (fastify) => {
                     };
                     connection.send(JSON.stringify(audioDelta));
 
-                    // El primer delta de una nueva respuesta inicia el contador de tiempo transcurrido
+                    // El primer delta de una nueva respuesta inicia el contador de tiempo
                     if (!responseStartTimestampTwilio) {
                         responseStartTimestampTwilio = latestMediaTimestamp;
                         if (SHOW_TIMING_MATH) console.log(`Setting start timestamp for new response: ${responseStartTimestampTwilio}ms`);
@@ -195,7 +242,7 @@ fastify.register(async (fastify) => {
                     if (response.item_id) {
                         lastAssistantItem = response.item_id;
                     }
-                    
+
                     sendMark(connection, streamSid);
                 }
 
@@ -229,7 +276,7 @@ fastify.register(async (fastify) => {
                         console.log('Incoming stream has started', streamSid);
 
                         // Reiniciar el inicio y el timestamp de medios en un nuevo stream
-                        responseStartTimestampTwilio = null; 
+                        responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
                         break;
                     case 'mark':
@@ -263,10 +310,12 @@ fastify.register(async (fastify) => {
     });
 });
 
-// Ruta WebSocket para la funcionalidad web (añadido)
+// Ruta WebSocket para la funcionalidad web
 fastify.register(async (fastify) => {
     fastify.get('/web-media-stream', { websocket: true }, (connection, req) => {
         console.log('Client connected to web media stream');
+
+        let assistantReplyText = ''; // Variable para acumular el texto del asistente
 
         const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
             headers: {
@@ -307,6 +356,48 @@ fastify.register(async (fastify) => {
 
                 if (LOG_EVENT_TYPES.includes(response.type)) {
                     console.log(`Received event for web: ${response.type}`, response);
+                }
+
+                // Acumular el texto del asistente
+                if (response.type === 'response.delta' && response.delta && response.delta.text) {
+                    assistantReplyText += response.delta.text;
+                }
+
+                // Enviar el texto acumulado al completar la respuesta
+                if (response.type === 'response.content.done') {
+                    // Configurar los datos y opciones para la solicitud POST
+                    const postData = new URLSearchParams({ message: assistantReplyText }).toString();
+
+                    const options = {
+                        hostname: 'www.logicoycreativo.com',
+                        port: 443,
+                        path: '/leeventos.php',
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Content-Length': Buffer.byteLength(postData)
+                        }
+                    };
+
+                    // Realizar la solicitud POST
+                    const req = https.request(options, (res) => {
+                        console.log(`STATUS: ${res.statusCode}`);
+                        res.setEncoding('utf8');
+                        res.on('data', (chunk) => {
+                            console.log(`BODY: ${chunk}`);
+                        });
+                    });
+
+                    req.on('error', (e) => {
+                        console.error(`Problem with request: ${e.message}`);
+                    });
+
+                    // Escribir los datos en el cuerpo de la solicitud
+                    req.write(postData);
+                    req.end();
+
+                    // Reiniciar el texto acumulado
+                    assistantReplyText = '';
                 }
 
                 if (response.type === 'response.audio.delta' && response.delta) {
