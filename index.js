@@ -4,12 +4,11 @@ import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
-import fetch from 'node-fetch'; // Usamos node-fetch para llamar a las APIs
-import { Buffer, Blob } from 'buffer'; // Node 18 ya incluye Blob y Buffer
+import fetch from 'node-fetch'; // Para llamadas HTTP a las APIs de OpenAI
+import { Buffer, Blob } from 'buffer';
 
 // Cargar variables de entorno
 dotenv.config();
-
 const { OPENAI_API_KEY } = process.env;
 if (!OPENAI_API_KEY) {
   console.error('Falta la clave API de OpenAI. Por favor, establécela en las variables de entorno.');
@@ -19,11 +18,10 @@ if (!OPENAI_API_KEY) {
 const PORT = process.env.PORT || 5050;
 
 // Mensajes del sistema para cada modalidad
-const SYSTEM_MESSAGE = `Sos Gastón. Atención al cliente de la empresa Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, tanto en forma de hablar, acentuación y tonalidad. Enfatizá que los argentinos no decimos "tienes", decimos "tenés", no decimos "aquí", decimos "acá", y aplicá eso para todos los casos similares (por ejemplo, en vez de "tendrás" decís "tenés"). El acento porteño también pronuncia la "ll" como una "sh" (por ejemplo, "llovió" suena como "shovió", similar a "Shazam" o "Sheila"). Tené en cuenta esto en todos los casos. Sos simpático y servicial y no hables con tono monótono, para que no parezcas un robot; poné énfasis como una persona real y hablá rápido. Estás al teléfono con un cliente que acaba de llamar. No te salgas de tu rol ni de la temática. Indagá sobre qué quiere el cliente antes de proceder a cargar el reclamo: es muy importante que hagas preguntas suficientes para obtener más información y armar un relato detallado de lo que expresa el cliente (en lo que respecta al reclamo o la queja; no te quedes con lo primero que te diga, indagá más). Luego, una vez que tengas completo lo que el cliente quiere (reclamo o sugerencia) y según corresponda, cargalo en la categoría correspondiente (pidiéndole los datos que correspondan para la categoría establecida). Pedile los datos de a uno o dos a la vez, todos juntos, para no atascar al cliente. No pidas ningún dato antes de haber repreguntado y obtenido el comentario completo (reclamo o sugerencia). Finalmente, cuando se complete el reclamo, indicale al cliente que le llegará un correo electrónico y despidiéndote.`;
+const SYSTEM_MESSAGE = `Sos Gastón. Atención al cliente de Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, con acentuación y tonalidad característica. Enfatizá que los argentinos decimos "tenés" en lugar de "tienes", "acá" en lugar de "aquí", y aplicá esto en todo el discurso. Sos simpático, servicial y hablás de forma natural y rápida. Indagá siempre sobre lo que necesita el cliente antes de solicitar datos.`;
+const SYSTEM_MESSAGE_WEB = `Sos Gastón, la asistente virtual de Molinos Rio de la Plata. Atendés al usuario que chatea desde la web.`;
 
-const SYSTEM_MESSAGE_WEB = `Sos Gastón, la asistente virtual de Molinos Rio de la Plata. Atendés al usuario que chatea contigo desde la web.`;
-
-// La voz a usar para TTS (se asume que la API de síntesis de OpenAI acepta este parámetro)
+// Voz a usar para TTS (la documentación de OpenAI soporta: alloy, ash, coral, echo, fable, onyx, nova, sage, shimmer)
 const VOICE = 'echo';
 
 // Inicializar Fastify
@@ -31,9 +29,9 @@ const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
-// Ruta raíz (verifica que el servidor esté corriendo)
+// Ruta raíz para verificar que el servidor funcione
 fastify.get('/', async (request, reply) => {
-  reply.send({ message: 'Twilio Media Stream Server is running!' });
+  reply.send({ message: 'Servidor de Media Stream funcionando!' });
 });
 
 // Endpoint TwiML para Twilio (no modificar)
@@ -49,16 +47,13 @@ fastify.all('/incoming-call', async (request, reply) => {
 });
 
 /*
-  Función que configura el manejo del WebSocket para la transmisión de media.
-  Se usa tanto para Twilio (/media-stream, audio en g711_ulaw) como para la web (/web-media-stream, audio en webm_opus).
-  La lógica:
-   - Se acumulan los chunks de audio recibidos.
-   - Se reinicia un timer de silencio; al caducar, se procesa el audio acumulado:
-       • Si es g711_ulaw se convierte a WAV (para que Whisper lo procese).
-       • Se llama a la API de transcripción (Whisper) para obtener el texto.
-       • Se agrega el mensaje del usuario al contexto y se consulta GPT (Chat API) para obtener la respuesta.
-       • Con la respuesta se llama a la API de síntesis (TTS) para obtener audio y se lo transmite en chunks.
-   - Si durante la reproducción TTS llega audio del usuario, se interrumpe (cancelación) y se procesa el nuevo input.
+  Función que maneja el flujo de audio:
+    - Acumula los chunks de audio recibidos.
+    - Usa un timer de silencio (700ms) para detectar el fin del habla del usuario.
+    - Cuando se detecta fin, convierte el audio (si es g711_ulaw) y lo envía a Whisper para transcripción.
+    - Agrega la transcripción al contexto y consulta a GPT (Chat API) para obtener la respuesta.
+    - Llama a synthesizeAndStreamTTS para generar y transmitir audio TTS mediante el endpoint /v1/audio/speech.
+    - Permite interrumpir la reproducción TTS si el usuario habla mientras el bot está hablando.
 */
 function setupMediaStreamHandler(connection, audioFormat) {
   let streamSid = null;
@@ -67,16 +62,15 @@ function setupMediaStreamHandler(connection, audioFormat) {
   let silenceTimer = null;
   let botSpeaking = false;
   let ttsCancel = false;
-  const SILENCE_THRESHOLD = 700; // milisegundos sin audio para considerar que terminó el habla
+  const SILENCE_THRESHOLD = 700; // milisegundos de silencio
 
-  // Selecciona el mensaje del sistema según la modalidad (Twilio o web)
-  const systemMsg = audioFormat === 'g711_ulaw' ? SYSTEM_MESSAGE : SYSTEM_MESSAGE_WEB;
+  // Seleccionar mensaje del sistema según modalidad
+  const systemMsg = (audioFormat === 'g711_ulaw') ? SYSTEM_MESSAGE : SYSTEM_MESSAGE_WEB;
   conversationContext.push({ role: 'system', content: systemMsg });
 
-  // Al iniciar la conexión simulamos que el usuario dice "Hola" para que el bot inicie la conversación.
+  // Simular entrada inicial del usuario ("Hola!") para arrancar la conversación.
   processUserUtterance("Hola!");
 
-  // Reinicia el timer de silencio cada vez que llega audio.
   function resetSilenceTimer() {
     if (silenceTimer) clearTimeout(silenceTimer);
     silenceTimer = setTimeout(() => {
@@ -86,7 +80,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }, SILENCE_THRESHOLD);
   }
 
-  // Manejo de mensajes entrantes
   connection.on('message', (message) => {
     try {
       const data = JSON.parse(message);
@@ -96,7 +89,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
         return;
       }
       if (data.event === 'media') {
-        // Si el bot está reproduciendo audio y llega audio del usuario, se interrumpe la reproducción.
+        // Si el bot está reproduciendo audio y el usuario habla, se interrumpe la reproducción TTS.
         if (botSpeaking) {
           console.log("Interrupción detectada: el usuario habló mientras el bot hablaba");
           ttsCancel = true;
@@ -116,7 +109,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
     if (silenceTimer) clearTimeout(silenceTimer);
   });
 
-  // Procesa el audio acumulado del usuario
+  // Procesa el audio acumulado del usuario (llamado cuando se detecta silencio)
   async function processUserAudio() {
     const audioBuffer = Buffer.concat(userAudioChunks);
     userAudioChunks = [];
@@ -124,19 +117,17 @@ function setupMediaStreamHandler(connection, audioFormat) {
     if (audioFormat === 'g711_ulaw') {
       wavBuffer = convertG711UlawToWav(audioBuffer);
     } else {
-      // Para web, se asume que el formato (webm_opus) es aceptable para Whisper; de lo contrario, habría que convertirlo.
+      // Para web, se asume que el formato webm_opus es aceptable para Whisper
       wavBuffer = audioBuffer;
     }
     console.log("Procesando audio del usuario, longitud (bytes):", wavBuffer.length);
 
-    // Llamada a la API Whisper para transcribir el audio
     const transcription = await transcribeAudio(wavBuffer);
     if (!transcription) {
       console.error("Error en la transcripción.");
       return;
     }
     console.log("Transcripción:", transcription);
-    // Agregar mensaje del usuario al contexto y obtener respuesta del bot
     conversationContext.push({ role: 'user', content: transcription });
     const botResponse = await getGPTResponse(conversationContext);
     if (!botResponse) {
@@ -147,7 +138,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
     await synthesizeAndStreamTTS(botResponse);
   }
 
-  // Procesa un mensaje de usuario dado (por ejemplo, el "Hola" inicial)
+  // Procesa una entrada directa del usuario (por ejemplo, el "Hola" inicial)
   async function processUserUtterance(text) {
     console.log("Procesando entrada de usuario:", text);
     conversationContext.push({ role: 'user', content: text });
@@ -160,7 +151,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
     await synthesizeAndStreamTTS(botResponse);
   }
 
-  // Llama a la API de chat de OpenAI (GPT-4) para obtener la respuesta en base al contexto.
+  // Consulta la API de Chat de OpenAI (GPT‑4) para obtener la respuesta según el contexto.
   async function getGPTResponse(messages) {
     try {
       const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -170,7 +161,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
           "Authorization": `Bearer ${OPENAI_API_KEY}`
         },
         body: JSON.stringify({
-          model: "gpt-4", // o el identificador que uses (por ejemplo, "gpt-4o")
+          model: "gpt-4",
           messages: messages,
           temperature: 0.8
         })
@@ -191,7 +182,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
   // Llama a la API Whisper de OpenAI para transcribir el audio.
   async function transcribeAudio(audioBuffer) {
     try {
-      // Se utiliza FormData (disponible en Node 18)
       const formData = new FormData();
       formData.append('file', new Blob([audioBuffer]), 'audio.wav');
       formData.append('model', 'whisper-1');
@@ -199,7 +189,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${OPENAI_API_KEY}`
-          // No se setea Content-Type para que FormData lo configure automáticamente
         },
         body: formData
       });
@@ -211,45 +200,45 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
   }
 
-  // Llama a la API de síntesis de voz (TTS) de OpenAI para generar audio a partir del texto y lo envía en chunks.
+  // Función TTS: utiliza el endpoint de OpenAI para generar audio (speech)
   async function synthesizeAndStreamTTS(text) {
     try {
       console.log("Sintetizando TTS para el texto:", text);
       ttsCancel = false;
-      const response = await fetch("https://api.openai.com/v1/audio/synthesis", {
+      const response = await fetch("https://api.openai.com/v1/audio/speech", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${OPENAI_API_KEY}`
         },
         body: JSON.stringify({
+          model: "tts-1",
+          input: text,
           voice: VOICE,
-          text: text,
-          output_audio_format: audioFormat  // "g711_ulaw" o "webm_opus" según corresponda
+          response_format: "mp3" // Puedes cambiar a opus, aac, flac, wav o pcm según necesites
         })
       });
       if (!response.ok) {
         console.error("Error en la API TTS:", response.statusText);
         return;
       }
-      // Se asume que la respuesta es JSON con { audio: "base64string" }
-      const data = await response.json();
-      let audioData = Buffer.from(data.audio, 'base64');
-      console.log("Audio TTS recibido, longitud (bytes):", audioData.length);
+      // Se espera que la respuesta devuelva el contenido binario del audio
+      const audioBuffer = Buffer.from(await response.arrayBuffer());
+      console.log("Audio TTS recibido, longitud (bytes):", audioBuffer.length);
       botSpeaking = true;
-      const chunkSize = 1600; // Ajustar según la duración del chunk (por ejemplo, 200ms de audio en g711)
-      for (let i = 0; i < audioData.length; i += chunkSize) {
+      const chunkSize = 1600; // Ajustar el tamaño del chunk según corresponda
+      for (let i = 0; i < audioBuffer.length; i += chunkSize) {
         if (ttsCancel) {
           console.log("Reproducción TTS interrumpida por el usuario.");
           break;
         }
-        const chunk = audioData.slice(i, i + chunkSize);
+        const chunk = audioBuffer.slice(i, i + chunkSize);
         connection.send(JSON.stringify({
           event: 'media',
           streamSid: streamSid,
           media: { payload: chunk.toString('base64') }
         }));
-        // Esperar el tiempo correspondiente al chunk (por ejemplo, 200ms)
+        // Simula el tiempo de reproducción en tiempo real (por ejemplo, 200ms por chunk)
         await new Promise(resolve => setTimeout(resolve, 200));
       }
       botSpeaking = false;
@@ -260,9 +249,8 @@ function setupMediaStreamHandler(connection, audioFormat) {
 
   // --- Funciones de conversión de audio ---
 
-  // Convierte un Buffer de audio en g711_ulaw a un Buffer WAV (PCM lineal a 8kHz, mono, 16 bits)
+  // Convierte un Buffer de audio en formato g711_ulaw a un Buffer WAV (PCM lineal a 8kHz, mono, 16 bits)
   function convertG711UlawToWav(ulawBuffer) {
-    // Decodifica cada byte de u-law a una muestra PCM de 16 bits
     const pcmSamples = new Int16Array(ulawBuffer.length);
     for (let i = 0; i < ulawBuffer.length; i++) {
       pcmSamples[i] = ulawToLinear(ulawBuffer[i]);
@@ -272,9 +260,8 @@ function setupMediaStreamHandler(connection, audioFormat) {
     return Buffer.concat([wavHeader, pcmBuffer]);
   }
 
-  // Función de conversión de μ-law a PCM lineal (16 bits)
+  // Conversión de μ-law a PCM lineal (16 bits)
   function ulawToLinear(ulawByte) {
-    // Conversión basada en el algoritmo estándar
     ulawByte = ~ulawByte;
     const sign = ulawByte & 0x80;
     const exponent = (ulawByte >> 4) & 0x07;
@@ -291,19 +278,19 @@ function setupMediaStreamHandler(connection, audioFormat) {
     const blockAlign = numChannels * bitsPerSample / 8;
     const dataSize = numSamples * numChannels * bitsPerSample / 8;
     const buffer = Buffer.alloc(44);
-    buffer.write('RIFF', 0); // ChunkID
-    buffer.writeUInt32LE(36 + dataSize, 4); // ChunkSize
-    buffer.write('WAVE', 8); // Format
-    buffer.write('fmt ', 12); // Subchunk1ID
-    buffer.writeUInt32LE(16, 16); // Subchunk1Size (PCM)
-    buffer.writeUInt16LE(1, 20); // AudioFormat (1 = PCM)
+    buffer.write('RIFF', 0);
+    buffer.writeUInt32LE(36 + dataSize, 4);
+    buffer.write('WAVE', 8);
+    buffer.write('fmt ', 12);
+    buffer.writeUInt32LE(16, 16);
+    buffer.writeUInt16LE(1, 20);
     buffer.writeUInt16LE(numChannels, 22);
     buffer.writeUInt32LE(sampleRate, 24);
     buffer.writeUInt32LE(byteRate, 28);
     buffer.writeUInt16LE(blockAlign, 32);
     buffer.writeUInt16LE(bitsPerSample, 34);
-    buffer.write('data', 36); // Subchunk2ID
-    buffer.writeUInt32LE(dataSize, 40); // Subchunk2Size
+    buffer.write('data', 36);
+    buffer.writeUInt32LE(dataSize, 40);
     return buffer;
   }
 }
@@ -316,7 +303,7 @@ fastify.register(async function (fastify) {
   });
 });
 
-// Registrar endpoint para web (audio en webm_opus)
+// Registrar endpoint para la web (audio en webm_opus)
 fastify.register(async function (fastify) {
   fastify.get('/web-media-stream', { websocket: true }, (connection, req) => {
     console.log("Cliente web conectado");
