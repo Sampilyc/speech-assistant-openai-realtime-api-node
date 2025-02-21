@@ -31,24 +31,40 @@ fastify.get('/', async (req, reply) => {
   reply.send({ message: 'Servidor de Media Stream funcionando!' });
 });
 
-// Endpoint TwiML para Twilio (se modifica para usar solo audio entrante)
+/*
+  Endpoint inicial: reproduce el mp3 de bienvenida y redirige a un endpoint que mantiene la llamada activa.
+*/
 fastify.all('/incoming-call', async (req, reply) => {
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>https://www.logicoycreativo.com/heroku/bienvenidamolinos.mp3</Play>
-  <Connect>
-    <Stream url="wss://${req.headers.host}/media-stream" track="inbound" />
-  </Connect>
+  <Redirect>https://${req.headers.host}/keep-call-alive</Redirect>
 </Response>`;
   reply.type('text/xml').send(twimlResponse);
 });
 
 /*
-  Hemos modificado la lógica para:
-    - Re-samplear a 16k antes de enviar a Whisper.
-    - Forzar idioma (es) y añadir un prompt contextual.
-    - Desactivar filtros agresivos de amplitud.
-    - Aumentar el "silencio" a 1.5s para que se capture una frase completa.
+  Endpoint para mantener la llamada activa:
+  - Se establece el stream de audio (solo audio entrante gracias a track="inbound")
+  - Se agrega un <Pause> largo (por ejemplo, 3600 segundos) para evitar que la llamada se corte.
+*/
+fastify.all('/keep-call-alive', async (req, reply) => {
+  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://${req.headers.host}/media-stream" track="inbound" />
+  </Connect>
+  <Pause length="3600"/>
+</Response>`;
+  reply.type('text/xml').send(twimlResponse);
+});
+
+/*
+  Lógica del Media Stream:
+  - Re-samplea a 16k antes de enviar a Whisper.
+  - Fuerza idioma español y añade un prompt contextual.
+  - Se reducen filtros agresivos para no perder audio.
+  - Se aumenta el silencio a 1.5s para capturar frases completas.
 */
 function setupMediaStreamHandler(connection, audioFormat) {
   let streamSid = null;
@@ -59,13 +75,12 @@ function setupMediaStreamHandler(connection, audioFormat) {
   let ttsCancel = false;
   let interruptionScheduled = false;
 
-  const SILENCE_THRESHOLD = 1500; // 1.5s de silencio
+  const SILENCE_THRESHOLD = 1500; // 1.5 segundos
 
-  // Selecciona el mensaje del sistema según el formato de audio
   const systemMsg = (audioFormat === 'g711_ulaw') ? SYSTEM_MESSAGE : SYSTEM_MESSAGE_WEB;
   conversationContext.push({ role: 'system', content: systemMsg });
 
-  // Dispara una frase inicial del bot
+  // Mensaje inicial simulado del bot
   processUserUtterance("Hola!");
 
   let ignoreMediaUntil = 0;
@@ -90,7 +105,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
       if (data.event === 'media') {
         const chunkBuffer = Buffer.from(data.media.payload, 'base64');
 
-        // Si se está reproduciendo TTS y aún estamos en periodo de ignorar, descartamos el chunk (o interrumpimos si hay mucho volumen)
         if (Date.now() < ignoreMediaUntil) {
           let sum = 0;
           for (let i = 0; i < chunkBuffer.length; i++) {
@@ -104,15 +118,13 @@ function setupMediaStreamHandler(connection, audioFormat) {
           return;
         }
 
-        // Gating mínimo: si el audio es ultra bajo se descarta
         let sum = 0;
         for (let i = 0; i < chunkBuffer.length; i++) {
           sum += Math.abs(ulawToLinear(chunkBuffer[i]));
         }
         const avgAmplitude = sum / chunkBuffer.length;
-        if (avgAmplitude < 20) return;
+        if (avgAmplitude < 20) return; // descarta ruido ultra bajo
 
-        // Si el bot está hablando, se interpreta como interrupción
         if (botSpeaking) {
           console.log("Interrupción detectada: el usuario habló mientras el bot hablaba");
           ttsCancel = true;
@@ -139,12 +151,10 @@ function setupMediaStreamHandler(connection, audioFormat) {
 
   async function processUserAudio() {
     if (userAudioChunks.length === 0) return;
-
     const audioBuffer = Buffer.concat(userAudioChunks);
     userAudioChunks = [];
     console.log("Procesando audio del usuario. Bytes:", audioBuffer.length);
 
-    // Convertimos g711_ulaw a WAV de 16k; si es otro formato se deja tal cual
     let wav16k;
     if (audioFormat === 'g711_ulaw') {
       wav16k = convertG711UlawToWav16k(audioBuffer);
@@ -159,7 +169,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
     console.log("Transcripción:", transcription);
 
-    // Consulta a GPT con la transcripción
     conversationContext.push({ role: 'user', content: transcription });
     const botResponse = await getGPTResponse(conversationContext);
     if (!botResponse) {
@@ -182,7 +191,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
     await synthesizeAndStreamTTS(botResponse);
   }
 
-  // Consulta a la API de GPT
   async function getGPTResponse(messages) {
     try {
       const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -210,16 +218,11 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
   }
 
-  // Llamada a la API Whisper: forzamos idioma español, añadimos prompt y response_format=text
   async function transcribeAudio(wavBuffer) {
     try {
       if (wavBuffer.length === 0) return null;
-
       const formData = new FormData();
-      formData.append('file', wavBuffer, {
-        filename: 'audio.wav',
-        contentType: 'audio/wav'
-      });
+      formData.append('file', wavBuffer, { filename: 'audio.wav', contentType: 'audio/wav' });
       formData.append('model', 'whisper-1');
       formData.append('language', 'es');
       formData.append('response_format', 'text');
@@ -230,7 +233,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
         headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
         body: formData
       });
-
       const result = await response.text();
       if (!result || result.includes('"error":')) {
         console.error("Respuesta Whisper con error o vacía:", result);
@@ -243,12 +245,10 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
   }
 
-  // Llamada a la API TTS de OpenAI y envío del audio en chunks
   async function synthesizeAndStreamTTS(text) {
     try {
       console.log("Sintetizando TTS:", text);
       ttsCancel = false;
-
       const ttsResponseFormat = (audioFormat === "g711_ulaw") ? "wav" : "mp3";
 
       const response = await fetch("https://api.openai.com/v1/audio/speech", {
@@ -268,21 +268,17 @@ function setupMediaStreamHandler(connection, audioFormat) {
         console.error("Error en API TTS:", response.statusText);
         return;
       }
-
       let audioBuffer = Buffer.from(await response.arrayBuffer());
       console.log("Audio TTS, bytes:", audioBuffer.length);
-
       if (audioFormat === "g711_ulaw") {
         audioBuffer = convertWavToG711Ulaw(audioBuffer);
         console.log("Convertido a G711 uLaw, bytes:", audioBuffer.length);
       }
-
       const chunkSize = 1600;
       const numChunks = Math.ceil(audioBuffer.length / chunkSize);
       const playbackDuration = numChunks * 200;
       ignoreMediaUntil = Date.now() + playbackDuration + 500;
       botSpeaking = true;
-
       for (let i = 0; i < audioBuffer.length; i += chunkSize) {
         if (ttsCancel) {
           console.log("TTS interrumpido.");
@@ -303,7 +299,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
   }
 
-  // Convierte G711 uLaw a WAV de 16kHz
   function convertG711UlawToWav16k(ulawBuffer) {
     const pcm8k = new Int16Array(ulawBuffer.length);
     for (let i = 0; i < ulawBuffer.length; i++) {
