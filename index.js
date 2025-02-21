@@ -2,6 +2,7 @@
 import Fastify from 'fastify';
 import fastifyWs from '@fastify/websocket';
 import dotenv from 'dotenv';
+import fastifyFormBody from '@fastify/formbody';
 import fetch from 'node-fetch';
 import FormData from 'form-data';
 import { Buffer } from 'buffer';
@@ -14,18 +15,33 @@ if (!OPENAI_API_KEY) {
 }
 const PORT = process.env.PORT || 5050;
 
-// Mensajes del sistema
 const SYSTEM_MESSAGE = "Sos Gastón. Atención al cliente de Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, con acentuación y tonalidad característica. Decí 'tenés' en lugar de 'tienes' y 'acá' en vez de 'aquí'.";
 const SYSTEM_MESSAGE_WEB = "Sos Gastón, la asistente virtual de Molinos Rio de la Plata.";
-
 const VOICE = "echo";
 
 const app = Fastify();
+app.register(fastifyFormBody);
 app.register(fastifyWs);
 
-// --- Endpoint TwiML ---
-// Este endpoint devuelve un TwiML que primero reproduce el MP3 de bienvenida y luego redirige
-// a un endpoint que abre el stream sólo con la pista de audio entrante.
+// Agregamos un parser para application/x-www-form-urlencoded para aceptar ese content type
+app.addContentTypeParser(
+  'application/x-www-form-urlencoded',
+  { parseAs: 'string' },
+  function (req, payload, done) {
+    done(null, payload);
+  }
+);
+
+// Ruta raíz
+app.get("/", async (req, reply) => {
+  reply.send({ message: "Servidor de Media Stream funcionando!" });
+});
+
+/*
+  Endpoint inicial:
+  - Reproduce el audio MP3 de bienvenida.
+  - Luego redirige al endpoint que abre el stream para recibir el audio entrante.
+*/
 app.all("/incoming-call", async (req, reply) => {
   const host = req.headers.host;
   const twiml = `
@@ -38,7 +54,10 @@ app.all("/incoming-call", async (req, reply) => {
   reply.type("text/xml").send(twiml);
 });
 
-// Este endpoint abre el stream de audio (sólo inbound) y mantiene la llamada activa
+/*
+  Endpoint para mantener la llamada activa y establecer el stream.
+  Se configura para que Twilio envíe sólo el audio entrante (track="inbound").
+*/
 app.all("/keep-call-alive", async (req, reply) => {
   const host = req.headers.host;
   const twiml = `
@@ -47,24 +66,19 @@ app.all("/keep-call-alive", async (req, reply) => {
       <Connect>
         <Stream url="wss://${host}/media-stream" track="inbound" />
       </Connect>
-      <!-- El Pause aquí mantiene la llamada abierta; si lo eliminas, Twilio podría terminar la llamada -->
       <Pause length="3600"/>
     </Response>
   `;
   reply.type("text/xml").send(twiml);
 });
 
-// --- WebSocket para recibir el audio ---
+// WebSocket para recibir el audio
 app.get("/media-stream", { websocket: true }, (connection, req) => {
   console.log("Cliente Twilio conectado al stream");
   setupMediaStreamHandler(connection, "g711_ulaw");
 });
 
-// --- Lógica del Media Stream ---
-// Esta función recopila los chunks de audio, espera 1.5s de silencio y luego procesa el audio:
-// - Convierte G.711 uLaw a un WAV a 16 kHz para mejorar la transcripción con Whisper.
-// - Envía el audio a la API Whisper (forzando idioma "es" y usando un prompt) y obtiene la transcripción.
-// - Llama a la API de GPT para obtener la respuesta y, finalmente, sintetiza la respuesta con TTS.
+// Lógica del Media Stream
 function setupMediaStreamHandler(connection, audioFormat) {
   let streamSid = null;
   let conversationContext = [];
@@ -75,7 +89,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
   let interruptionScheduled = false;
   const SILENCE_THRESHOLD = 1500; // 1.5 segundos
 
-  // Selecciona el mensaje del sistema
   const systemMsg = (audioFormat === "g711_ulaw") ? SYSTEM_MESSAGE : SYSTEM_MESSAGE_WEB;
   conversationContext.push({ role: "system", content: systemMsg });
 
@@ -103,7 +116,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
       }
       if (data.event === "media") {
         const chunkBuffer = Buffer.from(data.media.payload, "base64");
-        // Durante TTS ignoramos el audio, salvo si hay alto volumen (posible interrupción)
         if (Date.now() < ignoreMediaUntil) {
           let sum = 0;
           for (let i = 0; i < chunkBuffer.length; i++) {
@@ -116,14 +128,12 @@ function setupMediaStreamHandler(connection, audioFormat) {
           }
           return;
         }
-        // Filtro mínimo para descartar ultra ruido
         let sum = 0;
         for (let i = 0; i < chunkBuffer.length; i++) {
           sum += Math.abs(ulawToLinear(chunkBuffer[i]));
         }
         const avg = sum / chunkBuffer.length;
         if (avg < 20) return;
-        // Si el bot está hablando y se detecta audio, es una interrupción
         if (botSpeaking) {
           console.log("Interrupción: el usuario habló mientras el bot hablaba");
           ttsCancel = true;
@@ -284,7 +294,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
           streamSid: streamSid,
           media: { payload: chunk.toString("base64") }
         }));
-        await new Promise(res => setTimeout(res, 200));
+        await new Promise((res) => setTimeout(res, 200));
       }
       botSpeaking = false;
     } catch (err) {
@@ -379,7 +389,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
   }
 }
 
-// --- Iniciar servidor ---
 app.listen({ port: PORT, host: "0.0.0.0" }, (err, address) => {
   if (err) {
     console.error("Error al iniciar el servidor:", err);
