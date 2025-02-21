@@ -1,19 +1,18 @@
 /****************************************************************************
  * index.js
  * --------------------------------------------------------------------------
- * Usa SÓLO:
+ * SÓLO usa:
  *   - fastify
  *   - @fastify/formbody
  *   - @fastify/websocket
  *   - dotenv
  *   - ws
  *
- * Flujo:
- *   1) Twilio llama /incoming-call -> TwiML -> reproduce MP3 -> abre wss://.../media-stream
- *   2) Al llegar event:'start', el bot "habla primero" => GPT-4 => ElevenLabs TTS
- *   3) Se transcribe STT con Whisper cuando el usuario hable
- *   4) Interrupciones (si usuario habla, aborta TTS)
- *   5) Silencio 10s => "¿Hola, estás ahí?" ; 20s => cuelga
+ * Cambios clave:
+ *   - Envía tramas de silencio G.711 cada 1s (si no se está enviando TTS).
+ *   - El bot habla primero al evento 'start'.
+ *   - STT con Whisper, GPT-4 SSE, TTS con ElevenLabs.
+ *   - Interrupción y silencio 10s/20s.
  ****************************************************************************/
 
 import Fastify from 'fastify';
@@ -22,10 +21,8 @@ import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
 
-// Cargar variables de entorno
 dotenv.config();
 
-// Variables de entorno
 const {
   OPENAI_API_KEY,
   ELEVENLABS_API_KEY,
@@ -33,7 +30,7 @@ const {
   PORT
 } = process.env;
 
-// Verificamos
+// Validaciones
 if (!OPENAI_API_KEY) {
   console.error('Falta OPENAI_API_KEY');
   process.exit(1);
@@ -49,21 +46,33 @@ if (!ELEVEN_VOICE_ID) {
 
 // Mensaje de sistema
 const SYSTEM_MESSAGE = `
-Sos Gastón de Molinos. Hablás como porteño, simpático, no monótono.
-Indagá bien el reclamo antes de pedir datos y al final avisá que se envió un correo.
+Sos Gastón, atención al cliente de Molinos.
+Hablas como porteño, no monótono, amable.
+Indagá bien el reclamo antes de pedir datos, al final avisá que se envió un correo.
 `.trim();
 
-// Silencio
+// Silencios
 const SILENCE_WARNING_MS = 10000;
 const SILENCE_CUTOFF_MS = 20000;
 
-// Creamos server
+// Crear Fastify
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
+/** ------------------------------------------------------------------
+ *  Generar una trama de silencio G.711 μ-law de ~20ms
+ *  Normalmente 8kHz => 160 muestras => 160 bytes
+ *  μ-law de 0xFF ~ 0
+ --------------------------------------------------------------------*/
+function generateG711SilenceFrame() {
+  const frameSize = 160; // ~ 20ms a 8kHz
+  // 0xFF es el valor μ-law que corresponde a PCM = 0 (silencio)
+  return Buffer.alloc(frameSize, 0xFF);
+}
+
 // ------------------------------------------------------------------
-// Funciones de decodificación G.711 u-law y upsample
+// Decodificación G.711 μ-law => PCM int16
 // ------------------------------------------------------------------
 function ulawByteToPcm16(ulaw) {
   const u = ~ulaw & 0xFF;
@@ -71,11 +80,11 @@ function ulawByteToPcm16(ulaw) {
   const exponent = (u >> 4) & 0x07;
   const mantissa = u & 0x0F;
   let sample = (0x21 << exponent) * mantissa + (0x21 >> 1);
-  if (sign !== 0) sample = -sample;
+  if (sign) sample = -sample;
   return sample;
 }
 
-function decodeG711Ulaw(buffer) {
+function decodeG711(buffer) {
   const out = new Int16Array(buffer.length);
   for (let i = 0; i < buffer.length; i++) {
     out[i] = ulawByteToPcm16(buffer[i]);
@@ -92,7 +101,7 @@ function upsample8kTo16k(int16arr8k) {
   return out;
 }
 
-function int16ArrayToBuffer(int16arr) {
+function int16ToBuffer(int16arr) {
   const buf = Buffer.alloc(int16arr.length * 2);
   for (let i = 0; i < int16arr.length; i++) {
     buf.writeInt16LE(int16arr[i], i*2);
@@ -100,12 +109,12 @@ function int16ArrayToBuffer(int16arr) {
   return buf;
 }
 
-function buildWavPCM(pcm16Buf, sampleRate=16000) {
+function buildWav(pcm16buf, sampleRate=16000) {
   const numCh = 1;
-  const bitsPerSample = 16;
-  const byteRate = sampleRate * numCh * (bitsPerSample / 8);
-  const blockAlign = numCh * (bitsPerSample / 8);
-  const dataSize = pcm16Buf.length;
+  const bps = 16;
+  const byteRate = sampleRate * numCh * (bps/8);
+  const blockAlign = numCh * (bps/8);
+  const dataSize = pcm16buf.length;
   const chunkSize = 36 + dataSize;
 
   const wav = Buffer.alloc(44 + dataSize);
@@ -119,10 +128,10 @@ function buildWavPCM(pcm16Buf, sampleRate=16000) {
   wav.writeUInt32LE(sampleRate, 24);
   wav.writeUInt32LE(byteRate, 28);
   wav.writeUInt16LE(blockAlign, 32);
-  wav.writeUInt16LE(bitsPerSample, 34);
+  wav.writeUInt16LE(bps, 34);
   wav.write('data', 36);
   wav.writeUInt32LE(dataSize, 40);
-  pcm16Buf.copy(wav, 44);
+  pcm16buf.copy(wav, 44);
   return wav;
 }
 
@@ -130,7 +139,7 @@ function buildWavPCM(pcm16Buf, sampleRate=16000) {
 // Ruta raíz
 // ------------------------------------------------------------------
 fastify.get('/', async (req, reply) => {
-  reply.send({ status: 'ok', message: 'Servidor Twilio + GPT4 + ElevenLabs + Whisper' });
+  reply.send({status:'ok', message:'Twilio+GPT4+ElevenLabs+Whisper con silencio G.711'});
 });
 
 // ------------------------------------------------------------------
@@ -148,42 +157,37 @@ fastify.all('/incoming-call', async (req, reply) => {
 });
 
 // ------------------------------------------------------------------
-// Helper: build multipart/form-data a mano para Whisper
+// Helper: build multipart a mano p/ Whisper
 // ------------------------------------------------------------------
-function buildMultipartWav(wavBuf) {
+function buildMultipartWav(bufferWav) {
   const boundary = '----Boundary' + Math.random().toString(16).slice(2);
-  const fields = {
-    model: 'whisper-1',
-    language: 'es'
-  };
+  const model = 'whisper-1';
+  const lang = 'es';
+
   let headers = {
     'Authorization': `Bearer ${OPENAI_API_KEY}`,
     'Content-Type': `multipart/form-data; boundary=${boundary}`
   };
 
-  let preFile = `--${boundary}\r\n`;
-  preFile += `Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n`;
-  preFile += `Content-Type: audio/wav\r\n\r\n`;
+  let pre = `--${boundary}\r\n`;
+  pre += `Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n`;
+  pre += `Content-Type: audio/wav\r\n\r\n`;
 
-  let postFile = `\r\n`;
-  for (let k in fields) {
-    postFile += `--${boundary}\r\n`;
-    postFile += `Content-Disposition: form-data; name="${k}"\r\n\r\n`;
-    postFile += `${fields[k]}\r\n`;
-  }
-  postFile += `--${boundary}--\r\n`;
+  let post = `\r\n--${boundary}\r\n`;
+  post += `Content-Disposition: form-data; name="model"\r\n\r\n${model}\r\n`;
+  post += `--${boundary}\r\n`;
+  post += `Content-Disposition: form-data; name="language"\r\n\r\n${lang}\r\n`;
+  post += `--${boundary}--\r\n`;
 
-  const preFileBuf = Buffer.from(preFile, 'utf-8');
-  const postFileBuf = Buffer.from(postFile, 'utf-8');
-  const body = Buffer.concat([preFileBuf, wavBuf, postFileBuf]);
+  const preBuf = Buffer.from(pre, 'utf-8');
+  const postBuf = Buffer.from(post, 'utf-8');
+  const body = Buffer.concat([preBuf, bufferWav, postBuf]);
 
   return { body, headers };
 }
 
-// ------------------------------------------------------------------
 // STT con Whisper
-// ------------------------------------------------------------------
-async function sttWhisper(wavBuf) {
+async function whisperSTT(wavBuf) {
   const { body, headers } = buildMultipartWav(wavBuf);
   const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
@@ -198,12 +202,10 @@ async function sttWhisper(wavBuf) {
   return json.text?.trim() || '';
 }
 
-// ------------------------------------------------------------------
-// GPT-4 SSE => ElevenLabs TTS
-// ------------------------------------------------------------------
-async function gpt4AndSpeak(conversation, userMsg, sendAudioCb, onInterruptionCb) {
-  if (userMsg) {
-    conversation.push({ role: 'user', content: userMsg });
+// GPT-4 SSE => ElevenLabs
+async function gpt4AndTts(conversation, userText, sendAudioCb, getAbortSignal) {
+  if (userText) {
+    conversation.push({ role: 'user', content: userText });
   }
 
   const gptRes = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -225,7 +227,7 @@ async function gpt4AndSpeak(conversation, userMsg, sendAudioCb, onInterruptionCb
     return;
   }
 
-  let assistantTxt = '';
+  let assistantText = '';
   const reader = gptRes.body.getReader();
   reading: while (true) {
     const { done, value } = await reader.read();
@@ -241,9 +243,8 @@ async function gpt4AndSpeak(conversation, userMsg, sendAudioCb, onInterruptionCb
           const parsed = JSON.parse(dataStr);
           const token = parsed.choices?.[0]?.delta?.content || '';
           if (token) {
-            assistantTxt += token;
-            // TTS
-            const aborted = await speakToken(token, sendAudioCb, onInterruptionCb);
+            assistantText += token;
+            const aborted = await speakToken(token, sendAudioCb, getAbortSignal);
             if (aborted) break reading;
           }
         } catch {/* ignore */}
@@ -251,20 +252,18 @@ async function gpt4AndSpeak(conversation, userMsg, sendAudioCb, onInterruptionCb
     }
   }
 
-  if (assistantTxt.trim()) {
-    conversation.push({ role: 'assistant', content: assistantTxt.trim() });
+  if (assistantText.trim()) {
+    conversation.push({ role: 'assistant', content: assistantText.trim() });
   }
 }
 
-// ------------------------------------------------------------------
-// Llamar ElevenLabs streaming para cada token
-// ------------------------------------------------------------------
-async function speakToken(token, sendAudioCb, onInterruptionCb) {
+async function speakToken(token, sendAudioCb, getAbortSignal) {
   const ctrl = new AbortController();
   const signal = ctrl.signal;
-
   let aborted = false;
-  onInterruptionCb(() => {
+
+  // si getAbortSignal() se invoca => se llama ctrl.abort()
+  getAbortSignal(() => {
     ctrl.abort();
     aborted = true;
   });
@@ -300,7 +299,6 @@ async function speakToken(token, sendAudioCb, onInterruptionCb) {
       sendAudioCb(b64);
     }
   }
-
   return aborted;
 }
 
@@ -308,51 +306,25 @@ async function speakToken(token, sendAudioCb, onInterruptionCb) {
 // /media-stream => WS con Twilio
 // ------------------------------------------------------------------
 fastify.register(async function (instance) {
-  instance.get('/media-stream', { websocket: true }, (conn) => {
-    console.log('>> Llamada conectada /media-stream');
+  instance.get('/media-stream', { websocket: true }, (connection) => {
+    console.log('>> /media-stream: Llamada conectada');
 
     let streamSid = null;
     let conversation = [
       { role: 'system', content: SYSTEM_MESSAGE }
     ];
-    let isBotSpeaking = false;
+
+    // Flags
     let interruptionCb = null;
-
-    // Buffer
-    let audioChunks = [];
-    let lastLen = 0;
-
-    // Timers
-    let silenceTimer = null;
+    let isBotSpeaking = false;
     let userSilent = false;
 
-    // => Bot talk first en "start"
-    async function botInitialHello() {
-      // Forzamos un primer mensaje
-      isBotSpeaking = true;
-      console.log('>> El bot saluda primero...');
-      await gpt4AndSpeak(
-        conversation,
-        'Hola, soy Gastón de Molinos. ¿En qué puedo ayudarte hoy?',
-        (b64) => {
-          // Enviar chunk a Twilio
-          if (streamSid) {
-            conn.socket.send(JSON.stringify({
-              event: 'media',
-              streamSid,
-              media: { payload: b64 }
-            }));
-          }
-        },
-        (cb) => {
-          // Func que la llama se lleva para abortar
-          interruptionCb = cb;
-        }
-      );
-      isBotSpeaking = false;
-    }
+    // Audio buffer
+    let audioChunks = [];
+    let lastBufferLen = 0;
 
     // Silencio
+    let silenceTimer = null;
     function resetSilenceTimer() {
       if (silenceTimer) clearTimeout(silenceTimer);
       userSilent = false;
@@ -360,85 +332,98 @@ fastify.register(async function (instance) {
         userSilent = true;
         conversation.push({ role: 'user', content: '¿Hola, estás ahí?' });
         isBotSpeaking = true;
-        console.log('>> Silencio: Bot pregunta si está ahí');
-        await gpt4AndSpeak(
+        await gpt4AndTts(
           conversation,
           null,
-          (b64) => {
-            if (streamSid) {
-              conn.socket.send(JSON.stringify({
-                event: 'media',
-                streamSid,
-                media: { payload: b64 }
-              }));
-            }
-          },
+          (b64) => sendAudioToTwilio(b64),
           (cb) => { interruptionCb = cb; }
         );
         isBotSpeaking = false;
-
-        // 10s más => colgar
         silenceTimer = setTimeout(() => {
-          console.log('>> Cortamos por 20s de silencio');
-          conn.socket.close();
+          console.log('>> Cortar por 20s sin hablar');
+          connection.socket.close();
         }, SILENCE_CUTOFF_MS - SILENCE_WARNING_MS);
       }, SILENCE_WARNING_MS);
     }
 
+    // Forzar bot: Hola ...
+    async function botInitialHello() {
+      isBotSpeaking = true;
+      await gpt4AndTts(
+        conversation,
+        'Hola, soy Gastón de Molinos. ¿En qué puedo ayudarte hoy?',
+        (b64) => sendAudioToTwilio(b64),
+        (cb) => { interruptionCb = cb; }
+      );
+      isBotSpeaking = false;
+    }
+
+    // Abortar TTS
     function abortTtsIfAny() {
       if (interruptionCb) {
-        console.log('>> Abortando TTS por interrupción');
+        console.log('>> Abortando TTS (interrupción)');
         interruptionCb();
         interruptionCb = null;
       }
       isBotSpeaking = false;
     }
 
-    // STT => GPT
-    async function processAudio(pcm16k) {
-      const wav = buildWavPCM(pcm16k, 16000);
-      const text = await sttWhisper(wav);
-      if (text) {
-        console.log('>> Usuario dice:', text);
-        isBotSpeaking = true;
-        await gpt4AndSpeak(
-          conversation,
-          text,
-          (b64) => {
-            if (streamSid) {
-              conn.socket.send(JSON.stringify({
-                event: 'media',
-                streamSid,
-                media: { payload: b64 }
-              }));
-            }
-          },
-          (cb) => { interruptionCb = cb; }
-        );
-        isBotSpeaking = false;
-      }
+    // Enviar chunk a Twilio
+    function sendAudioToTwilio(base64Audio) {
+      if (!streamSid) return;
+      connection.socket.send(JSON.stringify({
+        event: 'media',
+        streamSid,
+        media: { payload: base64Audio }
+      }));
     }
+
+    // Intervalo de “silencio keepalive”
+    // Envia ~20ms de silencio G.711 c/1s si NO estamos enviando TTS
+    // Esto evita que Twilio corte si no hay tráfico
+    const silenceInterval = setInterval(() => {
+      if (!isBotSpeaking) {
+        // Enviamos 20ms de silencio
+        const silenceBuf = generateG711SilenceFrame();
+        const b64 = silenceBuf.toString('base64');
+        sendAudioToTwilio(b64);
+      }
+    }, 1000);
 
     // Detectar fin de habla
     const speechInterval = setInterval(async () => {
       if (audioChunks.length > 0) {
-        const total = audioChunks.reduce((acc, b) => acc + b.length, 0);
-        if (total === lastLen && total > 0) {
+        const totalLen = audioChunks.reduce((acc, b) => acc + b.length, 0);
+        if (totalLen === lastBufferLen && totalLen > 0) {
+          // asumimos fin de habla
           const combined = Buffer.concat(audioChunks);
           audioChunks = [];
-          const int16_8k = decodeG711Ulaw(combined);
+          const int16_8k = decodeG711(combined);
           const int16_16k = upsample8kTo16k(int16_8k);
-          const buf16 = int16ArrayToBuffer(int16_16k);
-          await processAudio(buf16);
+          const buf16 = int16ToBuffer(int16_16k);
+          const wavBuf = buildWav(buf16, 16000);
+
+          const text = await whisperSTT(wavBuf);
+          if (text) {
+            console.log('>> Usuario dice:', text);
+            isBotSpeaking = true;
+            await gpt4AndTts(
+              conversation,
+              text,
+              (b64) => sendAudioToTwilio(b64),
+              (cb) => { interruptionCb = cb; }
+            );
+            isBotSpeaking = false;
+          }
         }
-        lastLen = total;
+        lastBufferLen = totalLen;
       } else {
-        lastLen = 0;
+        lastBufferLen = 0;
       }
     }, 1000);
 
-    // Handle WS Twilio
-    conn.socket.on('message', (msg) => {
+    // Handler WS
+    connection.socket.on('message', (msg) => {
       let data;
       try {
         data = JSON.parse(msg);
@@ -451,7 +436,7 @@ fastify.register(async function (instance) {
           streamSid = data.start.streamSid;
           console.log('>> Twilio streaming START', streamSid);
           resetSilenceTimer();
-          // => El bot habla primero
+          // Bot habla primero
           botInitialHello();
           break;
 
@@ -461,8 +446,8 @@ fastify.register(async function (instance) {
             abortTtsIfAny();
           }
           if (data.media?.payload) {
-            const buf = Buffer.from(data.media.payload, 'base64');
-            audioChunks.push(buf);
+            const audioBuf = Buffer.from(data.media.payload, 'base64');
+            audioChunks.push(audioBuf);
           }
           break;
 
@@ -474,13 +459,14 @@ fastify.register(async function (instance) {
           break;
 
         default:
-          // console.log('No event:', data);
+          // console.log('Otro evento Twilio:', data);
           break;
       }
     });
 
-    conn.socket.on('close', () => {
-      console.log('>> /media-stream cerrado');
+    connection.socket.on('close', () => {
+      console.log('>> WS /media-stream cerrado');
+      clearInterval(silenceInterval);
       clearInterval(speechInterval);
       if (silenceTimer) clearTimeout(silenceTimer);
       abortTtsIfAny();
@@ -492,8 +478,8 @@ fastify.register(async function (instance) {
 const finalPort = PORT || 5050;
 fastify.listen({ port: finalPort, host: '0.0.0.0' }, (err, address) => {
   if (err) {
-    console.error('Error al iniciar:', err);
+    console.error('Error iniciando server:', err);
     process.exit(1);
   }
-  console.log(`>> Servidor Twilio+GPT4+ElevenLabs en ${address}`);
+  console.log(`>> Servidor con keepalive de silencio, escuchando en ${address}`);
 });
