@@ -5,7 +5,9 @@ import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
 import fetch from 'node-fetch';
-import { Buffer, Blob } from 'buffer';
+// Agrega esta importación para manejar FormData en Node
+import FormData from 'form-data';
+import { Buffer } from 'buffer';
 
 dotenv.config();
 const { OPENAI_API_KEY } = process.env;
@@ -19,6 +21,7 @@ const PORT = process.env.PORT || 5050;
 const SYSTEM_MESSAGE = `Sos Gastón. Atención al cliente de Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, con acentuación y tonalidad característica. Decí "tenés" en lugar de "tienes" y "acá" en vez de "aquí".`;
 const SYSTEM_MESSAGE_WEB = `Sos Gastón, la asistente virtual de Molinos Rio de la Plata.`;
 
+// Ajusta el nombre de la voz si lo deseas; "echo" es la demo interna de OpenAI TTS
 const VOICE = 'echo';
 
 const fastify = Fastify();
@@ -48,8 +51,8 @@ fastify.all('/incoming-call', async (req, reply) => {
   - Usa un timer (700ms) para detectar silencio.
   - Cuando hay silencio, junta los chunks, convierte (si es g711_ulaw) y envía el audio a Whisper para transcripción.
   - Con la transcripción se consulta GPT y se genera una respuesta.
-  - La respuesta se sintetiza con OpenAI TTS (con voz de "echo") y se transmite al cliente.
-  - Se implementa un mecanismo de interrupción mediante un timer "ignoreMediaUntil" para ignorar el eco del TTS.
+  - La respuesta se sintetiza con OpenAI TTS (voz "echo") y se transmite al cliente.
+  - Se implementa un mecanismo de interrupción (timer "ignoreMediaUntil") para ignorar eco del TTS.
 */
 function setupMediaStreamHandler(connection, audioFormat) {
   let streamSid = null;
@@ -61,11 +64,11 @@ function setupMediaStreamHandler(connection, audioFormat) {
   let interruptionScheduled = false;
   const SILENCE_THRESHOLD = 700; // ms
 
-  // Para este ejemplo, usamos SYSTEM_MESSAGE (o SYSTEM_MESSAGE_WEB) para el contexto
+  // Selección de mensaje del sistema
   const systemMsg = (audioFormat === 'g711_ulaw') ? SYSTEM_MESSAGE : SYSTEM_MESSAGE_WEB;
   conversationContext.push({ role: 'system', content: systemMsg });
 
-  // Simulamos una entrada inicial para arrancar la conversación.
+  // Dispara una primera frase del bot (simulado)
   processUserUtterance("Hola!");
 
   // Variable para ignorar audio durante la reproducción del TTS
@@ -90,7 +93,8 @@ function setupMediaStreamHandler(connection, audioFormat) {
       }
       if (data.event === 'media') {
         const chunkBuffer = Buffer.from(data.media.payload, 'base64');
-        // Si estamos en período de ignorar (TTS en reproducción) y la amplitud es baja, se ignora el chunk
+
+        // Si estamos en período de ignorar (TTS) y la amplitud es baja, descartamos el chunk
         if (Date.now() < ignoreMediaUntil) {
           let sum = 0;
           for (let i = 0; i < chunkBuffer.length; i++) {
@@ -99,22 +103,28 @@ function setupMediaStreamHandler(connection, audioFormat) {
           }
           const avgAmplitude = sum / chunkBuffer.length;
           if (avgAmplitude < 4000) {
+            // Ruido muy bajo, ignoramos
             return;
           } else {
+            // Ruido alto => interrupción
             console.log("Interrupción detectada (alto volumen durante TTS).");
             ttsCancel = true;
           }
-        } else if (audioFormat === 'g711_ulaw') {
-          // Filtro normal: ignorar chunks de eco/ruido
+        } 
+        // Si no estamos en ignoreMediaUntil, procesamos:
+        else if (audioFormat === 'g711_ulaw') {
+          // Filtro normal de amplitud
           let sum = 0;
           for (let i = 0; i < chunkBuffer.length; i++) {
             const sample = ulawToLinear(chunkBuffer[i]);
             sum += Math.abs(sample);
           }
+          const threshold = botSpeaking ? 3000 : 300;  // <-- Se sube un poco el threshold para evitar falsos "you"
           const avgAmplitude = sum / chunkBuffer.length;
-          const threshold = botSpeaking ? 3000 : 50;
           if (avgAmplitude < threshold) return;
         }
+
+        // Si llegamos hasta acá, guardamos el chunk
         if (botSpeaking) {
           console.log("Interrupción detectada: el usuario habló mientras el bot hablaba");
           ttsCancel = true;
@@ -142,8 +152,12 @@ function setupMediaStreamHandler(connection, audioFormat) {
   async function processUserAudio() {
     if (userAudioChunks.length === 0) return;
     const audioBuffer = Buffer.concat(userAudioChunks);
-    userAudioChunks = []; // Limpiar para evitar eco del TTS
-    let wavBuffer = (audioFormat === 'g711_ulaw') ? convertG711UlawToWav(audioBuffer) : audioBuffer;
+    userAudioChunks = []; // Limpiamos para evitar eco
+
+    let wavBuffer = (audioFormat === 'g711_ulaw')
+      ? convertG711UlawToWav(audioBuffer)
+      : audioBuffer;
+
     console.log("Procesando audio del usuario, longitud (bytes):", wavBuffer.length);
 
     const transcription = await transcribeAudio(wavBuffer);
@@ -152,6 +166,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
       return;
     }
     console.log("Transcripción:", transcription);
+
     conversationContext.push({ role: 'user', content: transcription });
     const botResponse = await getGPTResponse(conversationContext);
     if (!botResponse) {
@@ -201,24 +216,24 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
   }
 
+  // Se reemplaza el uso de Blob/ArrayBuffer por un append directo de Buffer
   async function transcribeAudio(audioBuffer) {
     try {
       if (audioBuffer.length === 0) return null;
-      // Extraer la porción exacta del ArrayBuffer usando slice.
-      const arrayBuffer = audioBuffer.buffer.slice(
-        audioBuffer.byteOffset,
-        audioBuffer.byteOffset + audioBuffer.byteLength
-      );
-      const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+
       const formData = new FormData();
-      formData.append('file', blob, 'audio.wav');
+      // Aquí especificamos 'filename' y 'contentType' para que Whisper lo interprete correctamente.
+      formData.append('file', audioBuffer, { filename: 'audio.wav', contentType: 'audio/wav' });
       formData.append('model', 'whisper-1');
+
       const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
         body: formData
       });
+
       const data = await response.json();
+      // data.text vendrá con la transcripción
       return data.text;
     } catch (error) {
       console.error("Error llamando a la API Whisper:", error);
@@ -231,6 +246,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
       console.log("Sintetizando TTS para el texto:", text);
       ttsCancel = false;
       const ttsResponseFormat = (audioFormat === "g711_ulaw") ? "wav" : "mp3";
+
       const response = await fetch("https://api.openai.com/v1/audio/speech", {
         method: "POST",
         headers: {
@@ -244,23 +260,31 @@ function setupMediaStreamHandler(connection, audioFormat) {
           response_format: ttsResponseFormat
         })
       });
+
       if (!response.ok) {
         console.error("Error en la API TTS:", response.statusText);
         return;
       }
+
       let audioBuffer = Buffer.from(await response.arrayBuffer());
       console.log("Audio TTS recibido, longitud (bytes):", audioBuffer.length);
+
       if (audioFormat === "g711_ulaw") {
         audioBuffer = convertWavToG711Ulaw(audioBuffer);
         console.log("Convertido a G711 ulaw, longitud (bytes):", audioBuffer.length);
       }
-      // Estimar duración de reproducción (número de chunks * 200ms)
-      const chunkSize = 1600;
+
+      // Estimamos la duración aproximada de reproducción
+      const chunkSize = 1600; // 3200 bytes = 200ms? Twilio usa 8000Hz, 8-bit ulaw => ~1600 bytes ~ 200ms
       const numChunks = Math.ceil(audioBuffer.length / chunkSize);
       const playbackDuration = numChunks * 200; // ms
+
       ignoreMediaUntil = Date.now() + playbackDuration + 500;
       console.log("Ignorando media hasta:", ignoreMediaUntil);
+
       botSpeaking = true;
+
+      // Envía el audio en chunks para que Twilio lo reproduzca progresivamente
       for (let i = 0; i < audioBuffer.length; i += chunkSize) {
         if (ttsCancel) {
           console.log("Reproducción TTS interrumpida.");
@@ -305,12 +329,20 @@ function setupMediaStreamHandler(connection, audioFormat) {
 
   function convertWavToG711Ulaw(wavBuffer) {
     const headerSize = 44;
-    const { sampleRate, numChannels, bitsPerSample } = parseWavHeader(wavBuffer);
+    const { sampleRate, numChannels } = parseWavHeader(wavBuffer);
     const pcmData = wavBuffer.slice(headerSize);
-    let inputPCM = new Int16Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength / 2);
+
+    let inputPCM = new Int16Array(
+      pcmData.buffer,
+      pcmData.byteOffset,
+      pcmData.byteLength / 2
+    );
+
+    // Resample si no es 8000Hz
     if (sampleRate !== 8000) {
       inputPCM = resamplePCM(inputPCM, sampleRate, 8000);
     }
+
     const numSamples = inputPCM.length;
     const ulawBuffer = Buffer.alloc(numSamples);
     for (let i = 0; i < numSamples; i++) {
@@ -322,8 +354,8 @@ function setupMediaStreamHandler(connection, audioFormat) {
   function parseWavHeader(buffer) {
     const sampleRate = buffer.readUInt32LE(24);
     const numChannels = buffer.readUInt16LE(22);
-    const bitsPerSample = buffer.readUInt16LE(34);
-    return { sampleRate, numChannels, bitsPerSample };
+    // const bitsPerSample = buffer.readUInt16LE(34); // no siempre se usa, pero se puede leer
+    return { sampleRate, numChannels };
   }
 
   function resamplePCM(inputSamples, inputRate, outputRate) {
@@ -346,6 +378,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
     if (sample > MAX) sample = MAX;
     sample += BIAS;
+
     let exponent = 7;
     for (let expMask = 0x4000; (sample & expMask) === 0 && exponent > 0; exponent--, expMask >>= 1) {}
     let mantissa = (sample >> (exponent + 3)) & 0x0F;
@@ -354,16 +387,17 @@ function setupMediaStreamHandler(connection, audioFormat) {
   }
 
   function createWavHeader(numSamples, sampleRate, numChannels, bitsPerSample) {
-    const byteRate = sampleRate * numChannels * bitsPerSample / 8;
-    const blockAlign = numChannels * bitsPerSample / 8;
-    const dataSize = numSamples * numChannels * bitsPerSample / 8;
+    const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+    const blockAlign = numChannels * (bitsPerSample / 8);
+    const dataSize = numSamples * blockAlign;
+
     const buffer = Buffer.alloc(44);
     buffer.write('RIFF', 0);
     buffer.writeUInt32LE(36 + dataSize, 4);
     buffer.write('WAVE', 8);
     buffer.write('fmt ', 12);
     buffer.writeUInt32LE(16, 16);
-    buffer.writeUInt16LE(1, 20);
+    buffer.writeUInt16LE(1, 20); // PCM
     buffer.writeUInt16LE(numChannels, 22);
     buffer.writeUInt32LE(sampleRate, 24);
     buffer.writeUInt32LE(byteRate, 28);
@@ -375,6 +409,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
   }
 }
 
+// Rutas websocket
 fastify.register(async function (fastify) {
   fastify.get('/media-stream', { websocket: true }, (connection, req) => {
     console.log("Cliente Twilio conectado");
@@ -389,6 +424,7 @@ fastify.register(async function (fastify) {
   });
 });
 
+// Inicia servidor
 fastify.listen({ port: PORT, host: '0.0.0.0' }, (err, address) => {
   if (err) {
     console.error("Error al iniciar el servidor:", err);
