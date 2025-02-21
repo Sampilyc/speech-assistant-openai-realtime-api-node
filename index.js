@@ -32,7 +32,9 @@ fastify.get('/', async (req, reply) => {
 });
 
 /*
-  Endpoint inicial: reproduce el mp3 de bienvenida y redirige a un endpoint que mantiene la llamada activa.
+  Endpoint inicial:
+  - Reproduce el audio MP3 de bienvenida.
+  - Luego redirige al endpoint que establece el stream para recibir el audio entrante.
 */
 fastify.all('/incoming-call', async (req, reply) => {
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
@@ -44,9 +46,8 @@ fastify.all('/incoming-call', async (req, reply) => {
 });
 
 /*
-  Endpoint para mantener la llamada activa:
-  - Se establece el stream de audio (solo audio entrante gracias a track="inbound")
-  - Se agrega un <Pause> largo (por ejemplo, 3600 segundos) para evitar que la llamada se corte.
+  Endpoint para mantener la llamada activa y establecer el stream.
+  Se configura para que Twilio envíe solo el audio entrante (track="inbound").
 */
 fastify.all('/keep-call-alive', async (req, reply) => {
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
@@ -54,17 +55,16 @@ fastify.all('/keep-call-alive', async (req, reply) => {
   <Connect>
     <Stream url="wss://${req.headers.host}/media-stream" track="inbound" />
   </Connect>
-  <Pause length="3600"/>
 </Response>`;
   reply.type('text/xml').send(twimlResponse);
 });
 
 /*
   Lógica del Media Stream:
-  - Re-samplea a 16k antes de enviar a Whisper.
-  - Fuerza idioma español y añade un prompt contextual.
-  - Se reducen filtros agresivos para no perder audio.
-  - Se aumenta el silencio a 1.5s para capturar frases completas.
+    - Re-samplea a 16k antes de enviar a Whisper.
+    - Fuerza idioma español y añade un prompt contextual.
+    - Se reducen filtros agresivos para no perder audio.
+    - Se aumenta el umbral de silencio a 1.5s para capturar frases completas.
 */
 function setupMediaStreamHandler(connection, audioFormat) {
   let streamSid = null;
@@ -77,10 +77,11 @@ function setupMediaStreamHandler(connection, audioFormat) {
 
   const SILENCE_THRESHOLD = 1500; // 1.5 segundos
 
+  // Selecciona el mensaje del sistema según el tipo de audio
   const systemMsg = (audioFormat === 'g711_ulaw') ? SYSTEM_MESSAGE : SYSTEM_MESSAGE_WEB;
   conversationContext.push({ role: 'system', content: systemMsg });
 
-  // Mensaje inicial simulado del bot
+  // Envía una entrada inicial (saludo) del bot
   processUserUtterance("Hola!");
 
   let ignoreMediaUntil = 0;
@@ -105,6 +106,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
       if (data.event === 'media') {
         const chunkBuffer = Buffer.from(data.media.payload, 'base64');
 
+        // Si el bot está reproduciendo TTS, ignoramos el audio (o interrumpimos si hay alto volumen)
         if (Date.now() < ignoreMediaUntil) {
           let sum = 0;
           for (let i = 0; i < chunkBuffer.length; i++) {
@@ -118,13 +120,15 @@ function setupMediaStreamHandler(connection, audioFormat) {
           return;
         }
 
+        // Filtro mínimo para descartar ruido ultra bajo
         let sum = 0;
         for (let i = 0; i < chunkBuffer.length; i++) {
           sum += Math.abs(ulawToLinear(chunkBuffer[i]));
         }
         const avgAmplitude = sum / chunkBuffer.length;
-        if (avgAmplitude < 20) return; // descarta ruido ultra bajo
+        if (avgAmplitude < 20) return;
 
+        // Si el bot está hablando y se detecta audio del usuario, se trata de una interrupción
         if (botSpeaking) {
           console.log("Interrupción detectada: el usuario habló mientras el bot hablaba");
           ttsCancel = true;
@@ -227,7 +231,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
       formData.append('language', 'es');
       formData.append('response_format', 'text');
       formData.append('prompt', "Esta es una conversación en español (argentino). Por favor transcribir con naturalidad usando expresiones como 'acá' y 'tenés'.");
-
       const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
@@ -250,7 +253,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
       console.log("Sintetizando TTS:", text);
       ttsCancel = false;
       const ttsResponseFormat = (audioFormat === "g711_ulaw") ? "wav" : "mp3";
-
       const response = await fetch("https://api.openai.com/v1/audio/speech", {
         method: "POST",
         headers: {
