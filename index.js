@@ -14,41 +14,41 @@ const PORT = process.env.PORT || 5050;
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 
-// Almacenamos el contexto de cada llamada en memoria, indexado por CallSid.
+// Usamos un objeto en memoria para guardar el contexto de cada llamada, indexado por CallSid.
 const sessions = {};
 
 /**
- * Endpoint para la llamada entrante.
- * Se crea la sesión y se responde con TwiML usando <Gather input="speech">.
+ * Endpoint para atender la llamada entrante.
+ * Inicializa el contexto y responde con TwiML que reproduce un audio inicial y
+ * utiliza <Gather input="speech" bargeIn="true"> para captar la voz del usuario.
  */
 fastify.post('/incoming-call', async (req, reply) => {
   const callSid = req.body.CallSid || 'default';
   sessions[callSid] = {
     context: [
-      {
-        role: 'system',
-        content:
-          'Sos Gastón. Atención al cliente de Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, con acentuación y tonalidad característica. Decí "tenés" en lugar de "tienes" y "acá" en vez de "aquí".'
-      }
+      { role: 'system', content: 'Sos Gastón. Atención al cliente de Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, con acentuación y tonalidad característica. Decí "tenés" en lugar de "tienes" y "acá" en vez de "aquí".' }
     ]
   };
 
-  // TwiML que reproduce un mensaje y usa <Gather> para capturar la voz del usuario.
+  // TwiML: reproducir audio inicial (mp3) y luego iniciar <Gather> con reconocimiento nativo de Twilio.
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="/process-speech" method="POST" speechTimeout="auto">
+  <Play>https://www.logicoycreativo.com/heroku/bienvenidamolinos.mp3</Play>
+  <Gather input="speech" bargeIn="true" action="/process-speech" method="POST" speechTimeout="auto">
     <Say voice="alice">Hola, ¿en qué puedo ayudarte hoy?</Say>
   </Gather>
-  <Say voice="alice">No recibí respuesta.</Say>
+  <Say voice="alice">No he recibido respuesta.</Say>
   <Redirect>/incoming-call</Redirect>
 </Response>`;
   reply.type('text/xml').send(twiml);
 });
 
 /**
- * Endpoint para procesar la entrada de voz.
+ * Endpoint para procesar la entrada de voz del usuario.
  * Twilio envía el resultado del reconocimiento (SpeechResult).
- * Se agrega al contexto, se consulta GPT, y se responde con TwiML que reproduce el audio TTS.
+ * Se agrega al contexto, se consulta GPT-4 y se almacena la respuesta.
+ * Luego se genera TwiML que reproduce el audio TTS (generado con OpenAI)
+ * mediante <Play> y vuelve a iniciar un Gather para continuar la conversación.
  */
 fastify.post('/process-speech', async (req, reply) => {
   const callSid = req.body.CallSid || 'default';
@@ -61,18 +61,16 @@ fastify.post('/process-speech', async (req, reply) => {
 
   const botResponse = await getGPTResponse(sessions[callSid].context);
   sessions[callSid].context.push({ role: 'assistant', content: botResponse });
-  // Guardamos la respuesta para la síntesis TTS
   sessions[callSid].lastResponse = botResponse;
   console.log(`Call ${callSid} - GPT responde: ${botResponse}`);
 
-  // Generamos TwiML que reproduce el audio TTS obtenido de nuestro endpoint /tts y vuelve a iniciar el Gather.
-  // Notar que usamos la URL completa, basándonos en el host de la petición.
+  // Usamos la URL completa para el endpoint de TTS, basándonos en el host de la petición.
   const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${protocol}://${req.headers.host}/tts?callSid=${callSid}</Play>
-  <Gather input="speech" action="/process-speech" method="POST" speechTimeout="auto">
-    <Say voice="alice">Si necesitas algo más, decime.</Say>
+  <Gather input="speech" bargeIn="true" action="/process-speech" method="POST" speechTimeout="auto">
+    <Say voice="alice">Si necesitas algo más, por favor decime.</Say>
   </Gather>
   <Redirect>/incoming-call</Redirect>
 </Response>`;
@@ -118,8 +116,7 @@ fastify.get('/tts', async (req, reply) => {
 });
 
 /**
- * Función que consulta la API de Chat de OpenAI (GPT-4)
- * usando el contexto de la conversación.
+ * Función que consulta la API de Chat de OpenAI (GPT-4) usando el contexto.
  */
 async function getGPTResponse(messages) {
   try {
