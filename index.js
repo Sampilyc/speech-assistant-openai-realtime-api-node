@@ -225,6 +225,8 @@ function setupMediaStreamHandler(connection, audioFormat) {
       // Aquí especificamos 'filename' y 'contentType' para que Whisper lo interprete correctamente.
       formData.append('file', audioBuffer, { filename: 'audio.wav', contentType: 'audio/wav' });
       formData.append('model', 'whisper-1');
+      formData.append('language', 'es');
+
 
       const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
         method: "POST",
