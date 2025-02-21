@@ -23,15 +23,6 @@ const app = Fastify();
 app.register(fastifyFormBody);
 app.register(fastifyWs);
 
-// Agregamos un parser para application/x-www-form-urlencoded para aceptar ese content type
-app.addContentTypeParser(
-  'application/x-www-form-urlencoded',
-  { parseAs: 'string' },
-  function (req, payload, done) {
-    done(null, payload);
-  }
-);
-
 // Ruta raíz
 app.get("/", async (req, reply) => {
   reply.send({ message: "Servidor de Media Stream funcionando!" });
@@ -39,7 +30,7 @@ app.get("/", async (req, reply) => {
 
 /*
   Endpoint inicial:
-  - Reproduce el audio MP3 de bienvenida.
+  - Reproduce el MP3 de bienvenida.
   - Luego redirige al endpoint que abre el stream para recibir el audio entrante.
 */
 app.all("/incoming-call", async (req, reply) => {
