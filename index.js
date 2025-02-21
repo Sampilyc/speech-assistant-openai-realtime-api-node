@@ -48,11 +48,11 @@ fastify.all('/incoming-call', async (request, reply) => {
 /*
   Esta función administra el flujo:
   • Acumula chunks de audio.
-  • Usa un timer de 700ms para detectar final del habla.
+  • Usa un timer de 700ms para detectar el fin del habla.
   • Cuando hay silencio, convierte (si es g711_ulaw) y envía a Whisper para transcripción.
   • Consulta GPT y luego solicita TTS mediante /v1/audio/speech.
   • Para llamadas (g711_ulaw) se pide TTS en WAV y se convierte a g711_ulaw para entregar el audio correcto.
-  • Se detectan interrupciones: se ignoran los chunks de baja amplitud (eco) y se limpia el buffer al terminar TTS.
+  • Se detectan interrupciones: se ignoran los chunks de baja amplitud y se limpia el buffer al finalizar TTS.
 */
 function setupMediaStreamHandler(connection, audioFormat) {
   let streamSid = null;
@@ -90,7 +90,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
       if (data.event === 'media') {
         const chunkBuffer = Buffer.from(data.media.payload, 'base64');
 
-        // Para audio g711_ulaw: calcular amplitud promedio
+        // Para audio g711_ulaw: calcular amplitud promedio para descartar eco.
         if (audioFormat === 'g711_ulaw') {
           let sum = 0;
           for (let i = 0; i < chunkBuffer.length; i++) {
@@ -104,7 +104,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
           }
         }
 
-        // Si el bot está hablando, marcar interrupción
         if (botSpeaking) {
           console.log("Interrupción detectada: el usuario habló mientras el bot hablaba");
           ttsCancel = true;
@@ -202,8 +201,11 @@ function setupMediaStreamHandler(connection, audioFormat) {
   async function transcribeAudio(audioBuffer) {
     try {
       if (audioBuffer.length === 0) return null;
+      // Crear una copia del buffer y la vista Uint8Array usando sus offset y byteLength correctos.
+      const bufferCopy = Buffer.from(audioBuffer);
+      const arr = new Uint8Array(bufferCopy.buffer, bufferCopy.byteOffset, bufferCopy.byteLength);
+      const blob = new Blob([arr], { type: 'audio/wav' });
       const formData = new FormData();
-      const blob = new Blob([new Uint8Array(audioBuffer)], { type: 'audio/wav' });
       formData.append('file', blob, 'audio.wav');
       formData.append('model', 'whisper-1');
       const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
@@ -245,7 +247,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
       let audioBuffer = Buffer.from(await response.arrayBuffer());
       console.log("Audio TTS recibido, longitud (bytes):", audioBuffer.length);
 
-      // Si es para Twilio, convertimos el WAV a g711_ulaw usando un procesamiento correcto.
+      // Si es para Twilio, convertimos el WAV a g711_ulaw.
       if (audioFormat === "g711_ulaw") {
         audioBuffer = convertWavToG711Ulaw(audioBuffer);
         console.log("Convertido a G711 ulaw, longitud (bytes):", audioBuffer.length);
@@ -264,9 +266,10 @@ function setupMediaStreamHandler(connection, audioFormat) {
           streamSid: streamSid,
           media: { payload: chunk.toString('base64') }
         }));
+        // Simula reproducción en tiempo real (ej. 200ms por chunk)
         await new Promise(resolve => setTimeout(resolve, 200));
       }
-      // Al finalizar, limpiar el buffer de entrada para evitar eco.
+      // Al finalizar, limpiar el buffer para evitar eco.
       userAudioChunks = [];
       botSpeaking = false;
     } catch (error) {
@@ -296,12 +299,12 @@ function setupMediaStreamHandler(connection, audioFormat) {
     return sign ? -sample : sample;
   }
 
-  // Aquí se agrega el procesamiento correcto del WAV recibido del TTS:
+  // Conversión de WAV (con header) a g711_ulaw, usando el header para obtener el sample rate real y resamplear a 8000Hz si es necesario.
   function convertWavToG711Ulaw(wavBuffer) {
-    const headerSize = 44; // Header estándar
+    const headerSize = 44;
     const { sampleRate, numChannels, bitsPerSample } = parseWavHeader(wavBuffer);
     const pcmData = wavBuffer.slice(headerSize);
-    let inputPCM = new Int16Array(pcmData.buffer, pcmData.byteOffset, pcmData.length / 2);
+    let inputPCM = new Int16Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength / 2);
     if (sampleRate !== 8000) {
       inputPCM = resamplePCM(inputPCM, sampleRate, 8000);
     }
