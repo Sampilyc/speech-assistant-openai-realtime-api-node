@@ -19,38 +19,21 @@ const sessions = {};
 
 /**
  * Endpoint para atender la llamada entrante.
- * Se inicializa la sesión, se simula una entrada inicial ("Hola") para obtener
- * una respuesta de GPT, se sintetiza con OpenAI TTS y se reproduce usando <Play>.
- * Luego se activa un <Gather> (con bargeIn) para capturar la voz del usuario.
+ * Se reproduce el mp3 inicial y luego se activa un Gather con reconocimiento nativo de Twilio.
  */
 fastify.post('/incoming-call', async (req, reply) => {
   const callSid = req.body.CallSid || 'default';
-  // Inicializamos el contexto con el mensaje de sistema.
   sessions[callSid] = {
     context: [
-      {
-        role: 'system',
-        content:
-          'Sos Gastón. Atención al cliente de Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, con acentuación y tonalidad característica. Decí "tenés" en lugar de "tienes" y "acá" en vez de "aquí".'
-      }
+      { role: 'system', content: 'Sos Gastón. Atención al cliente de Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, con acentuación y tonalidad característica. Decí "tenés" en lugar de "tienes" y "acá" en vez de "aquí".' }
     ]
   };
 
-  // Simulamos una entrada inicial para que el bot comience a hablar.
-  const initialInput = "Hola";
-  sessions[callSid].context.push({ role: 'user', content: initialInput });
-  const botResponse = await getGPTResponse(sessions[callSid].context);
-  sessions[callSid].context.push({ role: 'assistant', content: botResponse });
-  sessions[callSid].lastResponse = botResponse;
-  console.log(`Call ${callSid} - GPT saluda: ${botResponse}`);
-
-  // Generamos TwiML que reproduce el audio TTS (con voz de OpenAI) y activa un Gather.
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>${protocol}://${req.headers.host}/tts?callSid=${callSid}</Play>
+  <Play>https://www.logicoycreativo.com/heroku/bienvenidamolinos.mp3</Play>
   <Gather input="speech" bargeIn="true" action="/process-speech" method="POST" speechTimeout="auto">
-    <Say voice="alice">Por favor, dime cómo puedo ayudarte.</Say>
+    <Say voice="alice">Hola, ¿en qué puedo ayudarte hoy?</Say>
   </Gather>
   <Redirect>/incoming-call</Redirect>
 </Response>`;
@@ -58,10 +41,10 @@ fastify.post('/incoming-call', async (req, reply) => {
 });
 
 /**
- * Endpoint para procesar la entrada de voz del usuario.
- * Twilio envía el parámetro SpeechResult (reconocimiento STT nativo).
- * Se agrega al contexto, se consulta GPT y se actualiza la respuesta para TTS.
- * Luego se reproduce el audio TTS y se vuelve a activar el Gather.
+ * Endpoint para procesar la entrada de voz.
+ * Se recibe el SpeechResult (nativo de Twilio), se actualiza el contexto, se consulta GPT-4
+ * y se guarda la respuesta para la síntesis TTS.
+ * Luego se genera TwiML que reproduce el audio TTS y activa nuevamente el Gather.
  */
 fastify.post('/process-speech', async (req, reply) => {
   const callSid = req.body.CallSid || 'default';
@@ -91,7 +74,7 @@ fastify.post('/process-speech', async (req, reply) => {
 
 /**
  * Endpoint que genera el audio TTS usando OpenAI.
- * Llama a la API de OpenAI TTS y retorna el audio en formato mp3.
+ * Llama a la API de OpenAI TTS (modelo "tts-1" con voz "echo") y retorna el audio en formato mp3.
  */
 fastify.get('/tts', async (req, reply) => {
   const callSid = req.query.callSid || 'default';
