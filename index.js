@@ -4,7 +4,7 @@ import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
-import fetch from 'node-fetch'; // Para llamadas HTTP a las APIs de OpenAI
+import fetch from 'node-fetch';
 import { Buffer, Blob } from 'buffer';
 
 // Cargar variables de entorno
@@ -21,7 +21,7 @@ const PORT = process.env.PORT || 5050;
 const SYSTEM_MESSAGE = `Sos Gastón. Atención al cliente de Molinos Rio de la Plata. Sos argentino, hablás bien como un porteño, con acentuación y tonalidad característica. Decí "tenés" en lugar de "tienes" y "acá" en vez de "aquí". Sos simpático, servicial y hablás de forma natural y rápida. Indagá siempre sobre lo que necesita el cliente antes de solicitar datos.`;
 const SYSTEM_MESSAGE_WEB = `Sos Gastón, la asistente virtual de Molinos Rio de la Plata. Atendés al usuario que chatea desde la web.`;
 
-// Voz para TTS según OpenAI (modelos soportados: alloy, ash, coral, echo, etc.)
+// Voz para TTS según OpenAI (modelos: alloy, ash, coral, echo, etc.)
 const VOICE = 'echo';
 
 const fastify = Fastify();
@@ -46,14 +46,13 @@ fastify.all('/incoming-call', async (request, reply) => {
 });
 
 /*
-  Función que maneja el flujo de audio:
-   - Acumula los chunks recibidos.
-   - Usa un timer de silencio (700ms) para determinar fin de habla.
-   - Al finalizar, convierte (si es g711_ulaw) y envía el audio a Whisper para transcripción.
-   - Luego consulta GPT (Chat API) y, a partir de la respuesta, solicita TTS.
-   - Si la conexión es para Twilio (audioFormat === "g711_ulaw"), se solicita TTS en WAV y se convierte a g711_ulaw,
-     de modo que se reproduzca correctamente sin interferencias.
-   - Se mantiene la detección de interrupciones para cancelar el TTS si el usuario empieza a hablar.
+  Esta función administra el flujo:
+  • Acumula chunks de audio.
+  • Usa un timer de 700ms para detectar final del habla.
+  • Cuando hay silencio, convierte (si es g711_ulaw) y envía a Whisper para transcripción.
+  • Consulta GPT y luego solicita TTS mediante /v1/audio/speech.
+  • Para llamadas (g711_ulaw) se pide TTS en WAV y se convierte a μ‑law para entregar el audio correcto.
+  • Se detectan interrupciones: solo se considera válida si la amplitud (calculada en PCM) supera 3000 cuando botSpeaking es true.
 */
 function setupMediaStreamHandler(connection, audioFormat) {
   let streamSid = null;
@@ -63,13 +62,13 @@ function setupMediaStreamHandler(connection, audioFormat) {
   let botSpeaking = false;
   let ttsCancel = false;
   let interruptionScheduled = false;
-  const SILENCE_THRESHOLD = 700; // milisegundos de silencio
+  const SILENCE_THRESHOLD = 700; // ms de silencio
 
-  // Agregar mensaje de sistema según modalidad
+  // Agrega mensaje del sistema según modalidad
   const systemMsg = (audioFormat === 'g711_ulaw') ? SYSTEM_MESSAGE : SYSTEM_MESSAGE_WEB;
   conversationContext.push({ role: 'system', content: systemMsg });
 
-  // Simula entrada inicial para arrancar la conversación
+  // Simula entrada inicial ("Hola!") para arrancar la conversación.
   processUserUtterance("Hola!");
 
   function resetSilenceTimer() {
@@ -92,11 +91,23 @@ function setupMediaStreamHandler(connection, audioFormat) {
       if (data.event === 'media') {
         const chunkBuffer = Buffer.from(data.media.payload, 'base64');
 
-        // Para audio g711_ulaw: se puede filtrar parte del eco o interferencia (si se requiere ajuste adicional)
-        // Aquí se podría calcular la amplitud y descartar chunks de muy baja o muy alta amplitud.
-        // (Esta parte se puede afinar según la experiencia en producción)
+        // Solo para audio g711_ulaw: calculamos la amplitud promedio
+        if (audioFormat === 'g711_ulaw') {
+          let sum = 0;
+          for (let i = 0; i < chunkBuffer.length; i++) {
+            const sample = ulawToLinear(chunkBuffer[i]);
+            sum += Math.abs(sample);
+          }
+          const avgAmplitude = sum / chunkBuffer.length;
+          // Si botSpeaking es true, sólo consideramos como interrupción si la amplitud es mayor a 3000
+          const threshold = botSpeaking ? 3000 : 50;
+          if (avgAmplitude < threshold) {
+            // Si es eco o ruido bajo, ignoramos el chunk
+            return;
+          }
+        }
 
-        // Si el bot está reproduciendo TTS, detectamos posible interrupción
+        // Si el bot está hablando, detectamos (con la amplitud) posible interrupción
         if (botSpeaking) {
           console.log("Interrupción detectada: el usuario habló mientras el bot hablaba");
           ttsCancel = true;
@@ -124,7 +135,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
     if (silenceTimer) clearTimeout(silenceTimer);
   });
 
-  // Procesa el audio acumulado del usuario (al detectar silencio o interrupción)
+  // Procesa el audio acumulado del usuario (cuando se detecta silencio o interrupción válida)
   async function processUserAudio() {
     if (userAudioChunks.length === 0) return;
     const audioBuffer = Buffer.concat(userAudioChunks);
@@ -153,7 +164,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
     await synthesizeAndStreamTTS(botResponse);
   }
 
-  // Procesa una entrada directa del usuario (por ejemplo, "Hola!")
+  // Procesa una entrada directa (por ejemplo, "Hola!")
   async function processUserUtterance(text) {
     console.log("Procesando entrada de usuario:", text);
     conversationContext.push({ role: 'user', content: text });
@@ -166,7 +177,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
     await synthesizeAndStreamTTS(botResponse);
   }
 
-  // Consulta la API de Chat de OpenAI (GPT‑4) para obtener la respuesta según el contexto.
+  // Llama a la API de Chat de OpenAI (GPT‑4)
   async function getGPTResponse(messages) {
     try {
       const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -197,8 +208,11 @@ function setupMediaStreamHandler(connection, audioFormat) {
   // Llama a la API Whisper de OpenAI para transcribir el audio.
   async function transcribeAudio(audioBuffer) {
     try {
+      if (audioBuffer.length === 0) return null;
       const formData = new FormData();
-      formData.append('file', new Blob([audioBuffer]), 'audio.wav');
+      // Crear Blob usando un Uint8Array para evitar el error de estado inválido
+      const blob = new Blob([new Uint8Array(audioBuffer)], { type: 'audio/wav' });
+      formData.append('file', blob, 'audio.wav');
       formData.append('model', 'whisper-1');
       const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
         method: "POST",
@@ -215,13 +229,12 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
   }
 
-  // Función TTS: utiliza el endpoint de OpenAI para generar audio (speech)
+  // Función TTS: usa el endpoint /v1/audio/speech de OpenAI.
   async function synthesizeAndStreamTTS(text) {
     try {
       console.log("Sintetizando TTS para el texto:", text);
       ttsCancel = false;
-      // Si el flujo es para Twilio, solicitamos WAV para luego convertir a g711_ulaw;
-      // en otro caso (por ejemplo, web) se solicita MP3.
+      // Para llamadas (g711_ulaw) solicitamos WAV para luego convertir a μ‑law; para web usamos mp3.
       const ttsResponseFormat = (audioFormat === "g711_ulaw") ? "wav" : "mp3";
       const response = await fetch("https://api.openai.com/v1/audio/speech", {
         method: "POST",
@@ -243,14 +256,14 @@ function setupMediaStreamHandler(connection, audioFormat) {
       let audioBuffer = Buffer.from(await response.arrayBuffer());
       console.log("Audio TTS recibido, longitud (bytes):", audioBuffer.length);
 
-      // Si es Twilio, convertimos el WAV a g711_ulaw
+      // Si es Twilio, convertimos el WAV a g711_ulaw para reproducir correctamente.
       if (audioFormat === "g711_ulaw") {
         audioBuffer = convertWavToG711Ulaw(audioBuffer);
         console.log("Convertido a G711 ulaw, longitud (bytes):", audioBuffer.length);
       }
       
       botSpeaking = true;
-      const chunkSize = 1600; // Ajustar según corresponda
+      const chunkSize = 1600; // Ajustar según sea necesario
       for (let i = 0; i < audioBuffer.length; i += chunkSize) {
         if (ttsCancel) {
           console.log("Reproducción TTS interrumpida por el usuario.");
@@ -262,7 +275,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
           streamSid: streamSid,
           media: { payload: chunk.toString('base64') }
         }));
-        // Simula reproducción en tiempo real (por ejemplo, 200ms por chunk)
+        // Simula tiempo real de reproducción (ej. 200ms por chunk)
         await new Promise(resolve => setTimeout(resolve, 200));
       }
       botSpeaking = false;
@@ -273,7 +286,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
 
   // --- Funciones de conversión de audio ---
 
-  // Convierte un Buffer de audio en g711_ulaw a un Buffer WAV (usado para audio de usuario)
+  // Convierte audio en g711_ulaw a WAV (para audio del usuario)
   function convertG711UlawToWav(ulawBuffer) {
     const pcmSamples = new Int16Array(ulawBuffer.length);
     for (let i = 0; i < ulawBuffer.length; i++) {
@@ -296,7 +309,7 @@ function setupMediaStreamHandler(connection, audioFormat) {
     return sign ? -sample : sample;
   }
 
-  // Nueva función: Convierte un WAV (header + PCM) a g711_ulaw
+  // Convierte un WAV (header + PCM) a g711_ulaw
   function convertWavToG711Ulaw(wavBuffer) {
     const headerSize = 44; // Asumimos header estándar WAV
     const pcmDataLength = wavBuffer.length - headerSize;
