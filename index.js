@@ -30,37 +30,35 @@ app.get("/", async (req, reply) => {
 
 /*
   Endpoint inicial:
-  - Reproduce el MP3 de bienvenida.
+  - Reproduce el audio MP3 de bienvenida.
   - Luego redirige al endpoint que abre el stream para recibir el audio entrante.
+  Se usa .trim() para eliminar espacios extra antes de la declaración XML.
 */
 app.all("/incoming-call", async (req, reply) => {
   const host = req.headers.host;
-  const twiml = `
-    <?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-      <Play>https://www.logicoycreativo.com/heroku/bienvenidamolinos.mp3</Play>
-      <Redirect>https://${host}/keep-call-alive</Redirect>
-    </Response>
-  `;
-  reply.type("text/xml").send(twiml);
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>https://www.logicoycreativo.com/heroku/bienvenidamolinos.mp3</Play>
+  <Redirect>https://${host}/keep-call-alive</Redirect>
+</Response>`;
+  reply.type("text/xml").send(twiml.trim());
 });
 
 /*
   Endpoint para mantener la llamada activa y establecer el stream.
   Se configura para que Twilio envíe sólo el audio entrante (track="inbound").
+  También se usa .trim() para asegurar que el XML se envíe limpio.
 */
 app.all("/keep-call-alive", async (req, reply) => {
   const host = req.headers.host;
-  const twiml = `
-    <?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-      <Connect>
-        <Stream url="wss://${host}/media-stream" track="inbound" />
-      </Connect>
-      <Pause length="3600"/>
-    </Response>
-  `;
-  reply.type("text/xml").send(twiml);
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://${host}/media-stream" track="inbound" />
+  </Connect>
+  <Pause length="3600"/>
+</Response>`;
+  reply.type("text/xml").send(twiml.trim());
 });
 
 // WebSocket para recibir el audio
@@ -293,7 +291,6 @@ function setupMediaStreamHandler(connection, audioFormat) {
     }
   }
 
-  // Funciones auxiliares para conversión de audio
   function convertG711UlawToWav16k(ulawBuffer) {
     const pcm8k = new Int16Array(ulawBuffer.length);
     for (let i = 0; i < ulawBuffer.length; i++) {
